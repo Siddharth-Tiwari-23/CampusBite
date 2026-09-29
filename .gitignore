@@ -1,0 +1,44 @@
+# Environment and Secrets
+.env
+.env.*
+*.env
+*.local
+!.env.example
+
+# Go build artifacts
+backend/bin/
+backend/tmp/
+bin/
+tmp/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+build/
+.next/
+
+# IDE and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Logs
+*.log
