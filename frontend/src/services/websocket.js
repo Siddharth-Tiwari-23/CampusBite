@@ -28,7 +28,14 @@ class WebSocketClient {
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const defaultWsUrl = `${protocol}//${window.location.host}/api/v1/ws`
-    const baseUrl = import.meta.env.VITE_WS_URL || defaultWsUrl
+
+    let baseUrl = import.meta.env.VITE_WS_URL
+    if (!baseUrl && import.meta.env.VITE_API_BASE_URL && import.meta.env.VITE_API_BASE_URL.startsWith('http')) {
+      baseUrl = `${import.meta.env.VITE_API_BASE_URL.replace(/^http/, 'ws')}/ws`
+    }
+    if (!baseUrl) {
+      baseUrl = defaultWsUrl
+    }
     const url = `${baseUrl}?token=${encodeURIComponent(token)}`
 
     try {
