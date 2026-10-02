@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -82,6 +83,8 @@ type geminiResponseBody struct {
 }
 
 // ClassifyIntent uses Gemini to parse a natural language question into a structured intent and period.
+// If the Gemini API call or parsing fails for any reason (timeout, network, invalid format),
+// it gracefully logs the sanitized error and falls back to the deterministic heuristic classifier.
 func (s *HTTPGeminiService) ClassifyIntent(ctx context.Context, question string) (*models.AnalyticsIntentDTO, error) {
 	if s.apiKey == "" {
 		// Fallback to local heuristic classifier if no API key is provided
@@ -119,7 +122,8 @@ Rules:
 
 	rawText, err := s.callGeminiAPI(ctx, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrGeminiUnavailable, err)
+		log.Printf("[Gemini] classification failed, using heuristic fallback: %s", sanitizeLogMessage(err.Error(), s.apiKey))
+		return FallbackHeuristicClassifier(question)
 	}
 
 	// Sanitize output (strip potential markdown backticks)
@@ -127,11 +131,18 @@ Rules:
 
 	var result models.AnalyticsIntentDTO
 	if err := json.Unmarshal([]byte(cleanJSON), &result); err != nil {
-		return nil, fmt.Errorf("%w: failed to parse JSON: %v", ErrInvalidGeminiOutput, err)
+		log.Printf("[Gemini] classification failed, using heuristic fallback: %s", sanitizeLogMessage(fmt.Sprintf("malformed JSON output: %v", err), s.apiKey))
+		return FallbackHeuristicClassifier(question)
 	}
 
 	result.Intent = strings.ToUpper(strings.TrimSpace(result.Intent))
 	result.Period = strings.ToUpper(strings.TrimSpace(result.Period))
+
+	if result.Intent == "" {
+		log.Printf("[Gemini] classification failed, using heuristic fallback: empty intent in response")
+		return FallbackHeuristicClassifier(question)
+	}
+
 	if result.Limit <= 0 {
 		result.Limit = 5
 	}
@@ -179,11 +190,16 @@ Rules:
 
 	explanation, err := s.callGeminiAPI(ctx, reqBody)
 	if err != nil {
-		// Non-fatal: return fallback explanation
+		log.Printf("[Gemini] explanation generation failed, using deterministic fallback: %s", sanitizeLogMessage(err.Error(), s.apiKey))
 		return GenerateFallbackExplanation(intent, period, data), nil
 	}
 
-	return strings.TrimSpace(explanation), nil
+	trimmed := strings.TrimSpace(explanation)
+	if trimmed == "" {
+		return GenerateFallbackExplanation(intent, period, data), nil
+	}
+
+	return trimmed, nil
 }
 
 func (s *HTTPGeminiService) callGeminiAPI(ctx context.Context, reqBody geminiRequestBody) (string, error) {
@@ -248,7 +264,18 @@ func sanitizeJSONResponse(raw string) string {
 	return strings.TrimSpace(trimmed)
 }
 
-// FallbackHeuristicClassifier provides a zero-dependency intent classifier when no Gemini API key is configured.
+func sanitizeLogMessage(msg string, apiKey string) string {
+	if apiKey != "" {
+		msg = strings.ReplaceAll(msg, apiKey, "[REDACTED]")
+	}
+	reKey := regexp.MustCompile(`key=[a-zA-Z0-9_\-]+`)
+	msg = reKey.ReplaceAllString(msg, "key=[REDACTED]")
+	reAuth := regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9_\-\.]+`)
+	msg = reAuth.ReplaceAllString(msg, "Bearer [REDACTED]")
+	return msg
+}
+
+// FallbackHeuristicClassifier provides a zero-dependency intent classifier when no Gemini API key is configured or when Gemini API fails.
 func FallbackHeuristicClassifier(question string) (*models.AnalyticsIntentDTO, error) {
 	q := strings.ToLower(question)
 
@@ -279,20 +306,20 @@ func FallbackHeuristicClassifier(question string) (*models.AnalyticsIntentDTO, e
 
 	// Intent detection
 	var intent string
-	if strings.Contains(q, "top") || strings.Contains(q, "best selling item") || strings.Contains(q, "selling item") || strings.Contains(q, "popular item") {
+	if strings.Contains(q, "top") || strings.Contains(q, "best selling item") || strings.Contains(q, "selling item") || strings.Contains(q, "popular item") || strings.Contains(q, "best seller") || strings.Contains(q, "best sellers") || strings.Contains(q, "most ordered") || strings.Contains(q, "most popular") {
 		intent = models.AnalyticsIntentTopSellingItems
 	} else if strings.Contains(q, "category") || strings.Contains(q, "categories") {
 		intent = models.AnalyticsIntentBestSellingCategory
-	} else if strings.Contains(q, "average order") || strings.Contains(q, "aov") {
+	} else if strings.Contains(q, "average order") || strings.Contains(q, "aov") || strings.Contains(q, "average ticket") || strings.Contains(q, "avg order") {
 		intent = models.AnalyticsIntentAverageOrderValue
-	} else if strings.Contains(q, "revenue") || strings.Contains(q, "earned") || strings.Contains(q, "sales amount") || strings.Contains(q, "how much did we make") {
-		intent = models.AnalyticsIntentRevenueSummary
-	} else if strings.Contains(q, "by day") || strings.Contains(q, "daily") || strings.Contains(q, "each day") || strings.Contains(q, "day by day") {
+	} else if strings.Contains(q, "by day") || strings.Contains(q, "daily") || strings.Contains(q, "each day") || strings.Contains(q, "day by day") || strings.Contains(q, "breakdown by day") {
 		intent = models.AnalyticsIntentSalesByDay
 	} else if strings.Contains(q, "order") || strings.Contains(q, "how many orders") || strings.Contains(q, "count") {
 		intent = models.AnalyticsIntentOrderCount
-	} else {
+	} else if strings.Contains(q, "revenue") || strings.Contains(q, "earned") || strings.Contains(q, "sales amount") || strings.Contains(q, "how much did we make") || strings.Contains(q, "sales") || strings.Contains(q, "income") {
 		intent = models.AnalyticsIntentRevenueSummary
+	} else {
+		return nil, ErrUnsupportedIntent
 	}
 
 	return &models.AnalyticsIntentDTO{
@@ -402,11 +429,16 @@ Rules:
 
 	explanation, err := s.callGeminiAPI(ctx, reqBody)
 	if err != nil {
-		// Non-fatal: return fallback explanation
+		log.Printf("[Gemini] trend explanation generation failed, using deterministic fallback: %s", sanitizeLogMessage(err.Error(), s.apiKey))
 		return GenerateFallbackTrendExplanation(trendData), nil
 	}
 
-	return strings.TrimSpace(explanation), nil
+	trimmed := strings.TrimSpace(explanation)
+	if trimmed == "" {
+		return GenerateFallbackTrendExplanation(trendData), nil
+	}
+
+	return trimmed, nil
 }
 
 // GenerateFallbackTrendExplanation creates deterministic plain text trend summaries from computed data.

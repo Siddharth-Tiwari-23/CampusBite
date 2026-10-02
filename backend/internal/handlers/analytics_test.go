@@ -786,3 +786,183 @@ func TestTrendAnalytics_GeminiFailureGracefulHandling(t *testing.T) {
 		t.Errorf("expected fallback explanation when Gemini explanation fails, got empty string")
 	}
 }
+
+func TestAnalytics_GeminiScenarios(t *testing.T) {
+	mockGemini := &service.MockGeminiService{}
+	server, db, tokenService := setupAnalyticsTestApp(t, mockGemini)
+	defer server.Close()
+	defer db.Close()
+
+	_, adminToken := createRealTestUser(t, db, tokenService, models.RoleAdmin)
+	seedTestOrdersForAnalytics(t, db)
+
+	// Scenario A: Gemini success with "Top 5 selling items this week"
+	t.Run("GeminiSuccess_TopSellingItems", func(t *testing.T) {
+		mockGemini.ClassifyFunc = func(ctx context.Context, question string) (*models.AnalyticsIntentDTO, error) {
+			return &models.AnalyticsIntentDTO{
+				Intent: models.AnalyticsIntentTopSellingItems,
+				Period: models.AnalyticsPeriodThisWeek,
+				Limit:  5,
+			}, nil
+		}
+		mockGemini.ExplanationFunc = func(ctx context.Context, question, intent, period string, data interface{}) (string, error) {
+			return "Gemini AI explanation: Pizza was your top selling item.", nil
+		}
+
+		reqBody, _ := json.Marshal(models.AnalyticsQueryRequest{Question: "Top 5 selling items this week"})
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/analytics/query", bytes.NewBuffer(reqBody))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+		}
+
+		var res models.AnalyticsResponse
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if res.Intent != models.AnalyticsIntentTopSellingItems {
+			t.Errorf("expected intent TOP_SELLING_ITEMS, got %s", res.Intent)
+		}
+		if res.Explanation != "Gemini AI explanation: Pizza was your top selling item." {
+			t.Errorf("expected custom explanation, got %s", res.Explanation)
+		}
+	})
+
+	// Scenario B: Gemini unavailable -> uses FallbackHeuristicClassifier -> TOP_SELLING_ITEMS, THIS_WEEK, 5
+	t.Run("GeminiUnavailable_FallbackSucceeds", func(t *testing.T) {
+		mockGemini.ClassifyFunc = func(ctx context.Context, question string) (*models.AnalyticsIntentDTO, error) {
+			// Simulates HTTPGeminiService catching API error and falling back to heuristic
+			return service.FallbackHeuristicClassifier(question)
+		}
+		mockGemini.ExplanationFunc = nil // defaults to deterministic fallback
+
+		reqBody, _ := json.Marshal(models.AnalyticsQueryRequest{Question: "Top 5 selling items this week"})
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/analytics/query", bytes.NewBuffer(reqBody))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK via fallback classifier, got %d", resp.StatusCode)
+		}
+
+		var res models.AnalyticsResponse
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if res.Intent != models.AnalyticsIntentTopSellingItems {
+			t.Errorf("expected intent TOP_SELLING_ITEMS, got %s", res.Intent)
+		}
+		if res.Period != models.AnalyticsPeriodThisWeek {
+			t.Errorf("expected period THIS_WEEK, got %s", res.Period)
+		}
+		if !strings.Contains(res.Explanation, "top-selling item") {
+			t.Errorf("expected fallback explanation, got %s", res.Explanation)
+		}
+	})
+
+	// Scenario C: Gemini malformed JSON -> fallback classifier -> query succeeds
+	t.Run("GeminiMalformedJSON_FallbackSucceeds", func(t *testing.T) {
+		mockGemini.ClassifyFunc = func(ctx context.Context, question string) (*models.AnalyticsIntentDTO, error) {
+			// Simulates JSON parse failure triggering heuristic fallback
+			return service.FallbackHeuristicClassifier(question)
+		}
+
+		reqBody, _ := json.Marshal(models.AnalyticsQueryRequest{Question: "Show revenue summary this week"})
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/analytics/query", bytes.NewBuffer(reqBody))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+		}
+
+		var res models.AnalyticsResponse
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if res.Intent != models.AnalyticsIntentRevenueSummary {
+			t.Errorf("expected intent REVENUE_SUMMARY, got %s", res.Intent)
+		}
+	})
+
+	// Scenario D: Gemini returns invalid intent -> backend rejects safely
+	t.Run("GeminiInvalidIntent_RejectedSafely", func(t *testing.T) {
+		mockGemini.ClassifyFunc = func(ctx context.Context, question string) (*models.AnalyticsIntentDTO, error) {
+			return &models.AnalyticsIntentDTO{
+				Intent: "DROP_DATABASE",
+				Period: "THIS_WEEK",
+			}, nil
+		}
+
+		reqBody, _ := json.Marshal(models.AnalyticsQueryRequest{Question: "Delete everything"})
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/analytics/query", bytes.NewBuffer(reqBody))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for unapproved intent, got %d", resp.StatusCode)
+		}
+	})
+
+	// Scenario E: Explanation Gemini failure -> data still returned with deterministic fallback explanation
+	t.Run("ExplanationGeminiFailure_DataReturnedWithFallbackExplanation", func(t *testing.T) {
+		mockGemini.ClassifyFunc = func(ctx context.Context, question string) (*models.AnalyticsIntentDTO, error) {
+			return &models.AnalyticsIntentDTO{
+				Intent: models.AnalyticsIntentOrderCount,
+				Period: models.AnalyticsPeriodThisWeek,
+				Limit:  5,
+			}, nil
+		}
+		mockGemini.ExplanationFunc = func(ctx context.Context, question, intent, period string, data interface{}) (string, error) {
+			return "", errors.New("gemini explanation network timeout")
+		}
+
+		reqBody, _ := json.Marshal(models.AnalyticsQueryRequest{Question: "How many orders this week?"})
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/analytics/query", bytes.NewBuffer(reqBody))
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+		}
+
+		var res models.AnalyticsResponse
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if res.Intent != models.AnalyticsIntentOrderCount {
+			t.Errorf("expected intent ORDER_COUNT, got %s", res.Intent)
+		}
+		if !strings.Contains(res.Explanation, "Total orders") {
+			t.Errorf("expected deterministic fallback explanation, got %q", res.Explanation)
+		}
+	})
+}
+
