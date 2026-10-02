@@ -105,6 +105,7 @@ export function OrderDetailPage({ orderId, onBack }) {
   ]
 
   const statusIndexMap = {
+    PENDING: -1,
     PENDING_PAYMENT: -1,
     CONFIRMED: 0,
     PREPARING: 1,
@@ -115,7 +116,7 @@ export function OrderDetailPage({ orderId, onBack }) {
 
   const currentStepIdx = statusIndexMap[order.status] ?? 0
   const isCancelled = order.status === 'CANCELLED'
-  const isPendingPay = order.status === 'PENDING_PAYMENT'
+  const isPendingPay = order.status === 'PENDING' || order.status === 'PENDING_PAYMENT'
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-8">
@@ -143,7 +144,7 @@ export function OrderDetailPage({ orderId, onBack }) {
                   : 'bg-orange-100 text-orange-800'
               }`}
             >
-              {order.status.replace('_', ' ')}
+              {order.status === 'PENDING' ? 'PENDING PAYMENT' : order.status.replace('_', ' ')}
             </span>
           </div>
           <p className="text-xs text-gray-400 mt-1">
@@ -240,31 +241,38 @@ export function OrderDetailPage({ orderId, onBack }) {
       <div className="bg-white p-6 sm:p-8 rounded-3xl border border-gray-100 shadow-sm space-y-6">
         <h3 className="text-base font-black text-gray-900">Ordered Items</h3>
         <div className="divide-y divide-gray-100">
-          {order.items?.map((item) => (
-            <div key={item.id} className="py-4 flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 rounded-xl bg-orange-50 text-orange-600 flex items-center justify-center font-bold text-xs">
-                  {item.quantity}x
-                </div>
-                <div>
-                  <h4 className="font-bold text-gray-900 text-sm">
-                    {item.menu_item?.name || 'Cafeteria Item'}
-                  </h4>
-                  <p className="text-xs text-gray-400">
-                    ₹{item.price_at_order.toFixed(2)} each
-                  </p>
-                  {item.special_instructions && (
-                    <p className="text-[11px] text-orange-600 bg-orange-50 px-2 py-0.5 rounded-md mt-1 inline-block">
-                      Note: {item.special_instructions}
+          {order.items?.map((item, idx) => {
+            const itemName = item.name || item.menu_item?.name || 'Cafeteria Item'
+            const quantity = item.quantity || 1
+            const unitPrice = typeof item.unit_price === 'number' ? item.unit_price : (item.price_at_order || 0)
+            const subtotal = typeof item.subtotal === 'number' ? item.subtotal : (unitPrice * quantity)
+
+            return (
+              <div key={item.id || item.menu_item_id || idx} className="py-4 flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 rounded-xl bg-orange-50 text-orange-600 flex items-center justify-center font-bold text-xs">
+                    {quantity}x
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-gray-900 text-sm">
+                      {itemName}
+                    </h4>
+                    <p className="text-xs text-gray-400">
+                      ₹{unitPrice.toFixed(2)} each
                     </p>
-                  )}
+                    {item.special_instructions && (
+                      <p className="text-[11px] text-orange-600 bg-orange-50 px-2 py-0.5 rounded-md mt-1 inline-block">
+                        Note: {item.special_instructions}
+                      </p>
+                    )}
+                  </div>
                 </div>
+                <span className="font-black text-gray-900 text-sm">
+                  ₹{subtotal.toFixed(2)}
+                </span>
               </div>
-              <span className="font-black text-gray-900 text-sm">
-                ₹{(item.price_at_order * item.quantity).toFixed(2)}
-              </span>
-            </div>
-          ))}
+            )
+          })}
         </div>
 
         {/* Totals */}

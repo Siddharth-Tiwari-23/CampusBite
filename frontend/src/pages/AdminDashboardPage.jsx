@@ -271,6 +271,17 @@ function getCategoryForItem(item) {
             <Sparkles className="w-3.5 h-3.5 text-purple-600" />
             <span>Gemini Analytics</span>
           </button>
+          <button
+            onClick={() => setActiveTab('trends')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center space-x-1.5 ${
+              activeTab === 'trends'
+                ? 'bg-white text-gray-900 shadow-sm'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Demand Trends</span>
+          </button>
         </div>
       </div>
 
@@ -286,7 +297,7 @@ function getCategoryForItem(item) {
                 className="bg-white border border-gray-200 text-xs font-bold rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500"
               >
                 <option value="">All Statuses</option>
-                <option value="PENDING_PAYMENT">Pending Payment</option>
+                <option value="PENDING">Pending Payment</option>
                 <option value="CONFIRMED">Confirmed</option>
                 <option value="PREPARING">Preparing</option>
                 <option value="READY">Ready</option>
@@ -337,6 +348,10 @@ function getCategoryForItem(item) {
                               ? 'bg-orange-100 text-orange-800'
                               : order.status === 'CONFIRMED'
                               ? 'bg-blue-100 text-blue-800'
+                              : order.status === 'PENDING'
+                              ? 'bg-amber-100 text-amber-800'
+                              : order.status === 'CANCELLED'
+                              ? 'bg-red-100 text-red-800'
                               : 'bg-gray-100 text-gray-700'
                           }`}
                         >
@@ -345,16 +360,24 @@ function getCategoryForItem(item) {
                       </div>
 
                       <div className="bg-gray-50 p-3 rounded-2xl space-y-1.5 text-xs text-gray-600">
-                        {order.items?.map((it) => (
-                          <div key={it.id} className="flex justify-between">
-                            <span>
-                              {it.quantity}x {it.menu_item?.name || 'Item'}
-                            </span>
-                            <span className="font-semibold text-gray-900">
-                              ₹{(it.price_at_order * it.quantity).toFixed(2)}
-                            </span>
-                          </div>
-                        ))}
+                        {order.items?.map((it, idx) => {
+                          const itemName = it.name || it.menu_item?.name || 'Item'
+                          const quantity = it.quantity || 1
+                          const itemSubtotal =
+                            typeof it.subtotal === 'number'
+                              ? it.subtotal
+                              : (it.unit_price || it.price_at_order || 0) * quantity
+                          return (
+                            <div key={it.id || it.menu_item_id || idx} className="flex justify-between">
+                              <span>
+                                {quantity}x {itemName}
+                              </span>
+                              <span className="font-semibold text-gray-900">
+                                ₹{itemSubtotal.toFixed(2)}
+                              </span>
+                            </div>
+                          )
+                        })}
                       </div>
 
                       {order.special_instructions && (
@@ -398,7 +421,7 @@ function getCategoryForItem(item) {
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 mr-1" /> Completed
                         </span>
                       )}
-                      {order.status === 'PENDING_PAYMENT' && (
+                      {order.status === 'PENDING' && (
                         <button
                           onClick={() => handleUpdateStatus(order.id, 'CANCELLED')}
                           disabled={isUpdating}
@@ -746,10 +769,11 @@ function getCategoryForItem(item) {
               <div className="flex items-start justify-between border-b border-gray-100 pb-4">
                 <div>
                   <span className="text-[11px] font-bold text-purple-600 uppercase tracking-wider">
-                    Query Operation: {analyticsResult.operation}
+                    Query Operation: {analyticsResult.intent || analyticsResult.operation || 'GENERAL_QUERY'}
+                    {analyticsResult.period ? ` (${analyticsResult.period.replace('_', ' ')})` : ''}
                   </span>
                   <h3 className="text-xl font-black text-gray-900 mt-1">
-                    "{analyticsResult.question}"
+                    "{analyticsResult.question || analyticsQuestion}"
                   </h3>
                 </div>
                 <span className="text-xs bg-purple-50 text-purple-700 px-3 py-1 rounded-full font-bold">
@@ -757,42 +781,62 @@ function getCategoryForItem(item) {
                 </span>
               </div>
 
-              {/* Natural Language Answer */}
-              {analyticsResult.answer && (
+              {/* Natural Language Answer / Explanation */}
+              {(analyticsResult.explanation || analyticsResult.answer) && (
                 <div className="p-4 bg-purple-50/50 rounded-2xl border border-purple-100 text-sm text-purple-950 leading-relaxed font-medium">
-                  {analyticsResult.answer}
+                  {analyticsResult.explanation || analyticsResult.answer}
                 </div>
               )}
 
               {/* Data Table */}
-              {Array.isArray(analyticsResult.data) && analyticsResult.data.length > 0 && (
-                <div className="border border-gray-100 rounded-2xl overflow-hidden">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-gray-50 border-b border-gray-100 font-bold uppercase text-gray-500">
-                      <tr>
-                        {Object.keys(analyticsResult.data[0]).map((col) => (
-                          <th key={col} className="p-3">
-                            {col.replace('_', ' ')}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {analyticsResult.data.map((row, idx) => (
-                        <tr key={idx} className="hover:bg-gray-50/50">
-                          {Object.values(row).map((val, colIdx) => (
-                            <td key={colIdx} className="p-3 font-semibold text-gray-800">
-                              {typeof val === 'number'
-                                ? val.toLocaleString()
-                                : String(val ?? '')}
-                            </td>
+              {(() => {
+                const tableRows = Array.isArray(analyticsResult.data)
+                  ? analyticsResult.data
+                  : analyticsResult.data && typeof analyticsResult.data === 'object'
+                  ? [analyticsResult.data]
+                  : []
+
+                if (tableRows.length === 0) return null
+
+                const columns = Object.keys(tableRows[0] || {})
+                if (columns.length === 0) return null
+
+                return (
+                  <div className="border border-gray-100 rounded-2xl overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-gray-50 border-b border-gray-100 font-bold uppercase text-gray-500">
+                        <tr>
+                          {columns.map((col) => (
+                            <th key={col} className="p-3">
+                              {col.replace(/_/g, ' ')}
+                            </th>
                           ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {tableRows.map((row, idx) => (
+                          <tr key={idx} className="hover:bg-gray-50/50">
+                            {columns.map((col) => {
+                              const val = row[col]
+                              const isAmount = col.includes('revenue') || col.includes('amount') || col.includes('value') || col.includes('price')
+
+                              return (
+                                <td key={col} className="p-3 font-semibold text-gray-800">
+                                  {typeof val === 'number'
+                                    ? isAmount
+                                      ? `₹${val.toFixed(2)}`
+                                      : val.toLocaleString()
+                                    : String(val ?? '')}
+                                </td>
+                              )
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              })()}
             </div>
           )}
         </div>
@@ -805,7 +849,7 @@ function getCategoryForItem(item) {
             <div>
               <h3 className="text-lg font-black text-gray-900">Period-over-Period Demand Insights</h3>
               <p className="text-xs text-gray-500">
-                Lightweight statistical comparison against previous cafeteria operating periods
+                Lightweight statistical comparison against previous cafeteria operating periods (NON-ML)
               </p>
             </div>
 
@@ -841,14 +885,47 @@ function getCategoryForItem(item) {
             </div>
           ) : (
             <div className="space-y-6">
-              {/* Summary Explanation */}
-              {trendData.summary && (
-                <div className="p-5 bg-emerald-50 rounded-3xl border border-emerald-100 text-xs sm:text-sm text-emerald-950 font-medium leading-relaxed">
-                  <div className="flex items-center space-x-2 text-emerald-800 font-bold uppercase tracking-wider text-[11px] mb-2">
-                    <Sparkles className="w-4 h-4" />
-                    <span>Demand Analysis Summary</span>
+              {/* Summary / Explanation */}
+              {(trendData.explanation || trendData.summary) && (
+                <div className="p-5 bg-emerald-50 rounded-3xl border border-emerald-100 text-xs sm:text-sm text-emerald-950 font-medium leading-relaxed space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2 text-emerald-800 font-bold uppercase tracking-wider text-[11px]">
+                      <Sparkles className="w-4 h-4" />
+                      <span>Demand Analysis Summary</span>
+                    </div>
+                    {trendData.summary?.overall_trend && (
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-200/60 text-emerald-900">
+                        {trendData.summary.overall_trend}
+                      </span>
+                    )}
                   </div>
-                  {trendData.summary}
+
+                  {trendData.explanation ? (
+                    <p className="text-emerald-900 leading-relaxed">{trendData.explanation}</p>
+                  ) : trendData.summary ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+                      <div className="bg-white/70 p-2.5 rounded-xl">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase block">Current Units</span>
+                        <span className="text-sm font-black text-gray-900">{trendData.summary.total_current_units ?? 0}</span>
+                      </div>
+                      <div className="bg-white/70 p-2.5 rounded-xl">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase block">Previous Units</span>
+                        <span className="text-sm font-black text-gray-900">{trendData.summary.total_previous_units ?? 0}</span>
+                      </div>
+                      <div className="bg-white/70 p-2.5 rounded-xl">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase block">Current Revenue</span>
+                        <span className="text-sm font-black text-gray-900">₹{(trendData.summary.total_current_revenue ?? 0).toFixed(2)}</span>
+                      </div>
+                      <div className="bg-white/70 p-2.5 rounded-xl">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase block">Overall Growth</span>
+                        <span className="text-sm font-black text-gray-900">
+                          {trendData.summary.overall_growth_percent != null
+                            ? `${trendData.summary.overall_growth_percent > 0 ? '+' : ''}${trendData.summary.overall_growth_percent.toFixed(1)}%`
+                            : 'N/A'}
+                        </span>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               )}
 
@@ -865,18 +942,33 @@ function getCategoryForItem(item) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 text-xs">
-                    {trendData.items?.map((item) => {
-                      const isUp = item.trend_direction === 'UP'
-                      const isDown = item.trend_direction === 'DOWN'
+                    {((trendData.insights && trendData.insights.length > 0) ? trendData.insights : (trendData.items || [])).map((item, idx) => {
+                      const itemName = item.item_name || item.name || 'Menu Item'
+                      const currentUnits = item.current_units ?? item.current_quantity ?? 0
+                      const previousUnits = item.previous_units ?? item.previous_quantity ?? 0
+                      const growth = item.growth_percent ?? item.percentage_change
+                      const trend = item.trend || item.trend_direction || 'STABLE'
+
+                      const isUp = trend === 'INCREASING' || trend === 'UP'
+                      const isDown = trend === 'DECREASING' || trend === 'DOWN'
+                      const isNew = trend === 'NEW'
 
                       return (
-                        <tr key={item.item_id} className="hover:bg-gray-50/50">
-                          <td className="p-4 pl-6 font-bold text-gray-900">{item.item_name}</td>
-                          <td className="p-4 font-black">{item.current_quantity}</td>
-                          <td className="p-4 text-gray-500">{item.previous_quantity}</td>
+                        <tr key={item.item_id || item.id || idx} className="hover:bg-gray-50/50">
+                          <td className="p-4 pl-6 font-bold text-gray-900">{itemName}</td>
+                          <td className="p-4 font-black">{currentUnits}</td>
+                          <td className="p-4 text-gray-500">{previousUnits}</td>
                           <td className="p-4 font-bold">
-                            {item.percentage_change > 0 ? '+' : ''}
-                            {item.percentage_change.toFixed(1)}%
+                            {growth != null ? (
+                              <span>
+                                {growth > 0 ? '+' : ''}
+                                {growth.toFixed(1)}%
+                              </span>
+                            ) : isNew ? (
+                              <span className="text-purple-600">New Item</span>
+                            ) : (
+                              <span>0.0%</span>
+                            )}
                           </td>
                           <td className="p-4 pr-6">
                             <span
@@ -885,10 +977,12 @@ function getCategoryForItem(item) {
                                   ? 'bg-emerald-100 text-emerald-800'
                                   : isDown
                                   ? 'bg-red-100 text-red-800'
+                                  : isNew
+                                  ? 'bg-purple-100 text-purple-800'
                                   : 'bg-gray-100 text-gray-700'
                               }`}
                             >
-                              {item.trend_direction}
+                              {trend}
                             </span>
                           </td>
                         </tr>

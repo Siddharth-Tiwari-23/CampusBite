@@ -53,6 +53,7 @@ export function OrderHistoryPage({ onSelectOrder, onNavigateToMenu }) {
 
   const getStatusBadge = (status) => {
     switch (status) {
+      case 'PENDING':
       case 'PENDING_PAYMENT':
         return 'bg-amber-50 text-amber-700 border-amber-200'
       case 'CONFIRMED':
