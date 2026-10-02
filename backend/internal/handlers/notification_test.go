@@ -254,6 +254,39 @@ func TestNotification_MarkAllAsRead(t *testing.T) {
 	if u2List.UnreadCount != 2 {
 		t.Errorf("expected User 2 to still have 2 unread notifications, got %d", u2List.UnreadCount)
 	}
+
+	// User 2 marks all as read via PATCH method
+	reqPatch, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/notifications/read-all", nil)
+	reqPatch.Header.Set("Authorization", "Bearer "+token2)
+	respPatch, err := http.DefaultClient.Do(reqPatch)
+	if err != nil {
+		t.Fatalf("patch request failed: %v", err)
+	}
+	defer respPatch.Body.Close()
+
+	if respPatch.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 OK for PATCH /read-all, got %d", respPatch.StatusCode)
+	}
+
+	var patchResult map[string]interface{}
+	_ = json.NewDecoder(respPatch.Body).Decode(&patchResult)
+	if count, ok := patchResult["marked_count"].(float64); !ok || int(count) != 2 {
+		t.Errorf("expected marked_count 2 for user 2 via PATCH, got %v", patchResult["marked_count"])
+	}
+
+	// Verify User 2 unread count is now 0
+	req, _ = http.NewRequest(http.MethodGet, server.URL+"/api/v1/notifications", nil)
+	req.Header.Set("Authorization", "Bearer "+token2)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	var u2AfterList models.NotificationListResponse
+	_ = json.NewDecoder(resp.Body).Decode(&u2AfterList)
+	if u2AfterList.UnreadCount != 0 {
+		t.Errorf("expected User 2 unread count to be 0 after PATCH read-all, got %d", u2AfterList.UnreadCount)
+	}
 }
 
 func TestNotification_OrderStatusLifecycle_Persistence(t *testing.T) {

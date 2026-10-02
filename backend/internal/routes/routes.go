@@ -191,7 +191,10 @@ func SetupRouter(db *database.DB, tokenService *auth.TokenService, optionalServi
 		{
 			notifRoutes.GET("", notifHandler.ListNotifications)
 			notifRoutes.PATCH("/:id/read", notifHandler.MarkRead)
+			notifRoutes.PUT("/:id/read", notifHandler.MarkRead)
 			notifRoutes.POST("/read-all", notifHandler.MarkAllRead)
+			notifRoutes.PATCH("/read-all", notifHandler.MarkAllRead)
+			notifRoutes.PUT("/read-all", notifHandler.MarkAllRead)
 		}
 
 		// Analytics routes (ADMIN only)

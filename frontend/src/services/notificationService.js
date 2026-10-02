@@ -14,7 +14,7 @@ export const notificationService = {
 
   async markAllAsRead() {
     return request('/notifications/read-all', {
-      method: 'PATCH',
+      method: 'POST',
     })
   },
 }

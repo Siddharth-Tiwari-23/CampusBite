@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import { notificationService } from '../services/notificationService'
 import { wsClient } from '../services/websocket'
 import { useAuth } from './AuthContext'
+import { playNotificationSound } from '../utils/sound'
 
 const NotificationContext = createContext(null)
 
@@ -28,7 +29,7 @@ export function NotificationProvider({ children }) {
       setNotifications(notifs)
       setUnreadCount(unread)
     } catch {
-      // ignore fetch errors
+      // ignore fetch errors on polling/refresh
     } finally {
       setIsLoading(false)
     }
@@ -38,13 +39,26 @@ export function NotificationProvider({ children }) {
     refreshNotifications()
   }, [refreshNotifications])
 
-  // Listen to incoming WebSocket notifications
+  // Listen to incoming real-time WebSocket notifications
   useEffect(() => {
     if (!isAuthenticated) return
 
+    // 1. Student receives new notification
     const handleNewNotification = (payload) => {
       setNotifications((prev) => [payload, ...prev])
       setUnreadCount((c) => c + 1)
+      playNotificationSound()
+    }
+
+    // 2. Student receives order status update (CONFIRMED, PREPARING, READY, COMPLETED, CANCELLED)
+    const handleOrderStatusUpdate = () => {
+      refreshNotifications()
+      playNotificationSound()
+    }
+
+    // 3. Admin receives new placed order
+    const handleNewOrder = () => {
+      playNotificationSound()
     }
 
     const handleReconnect = () => {
@@ -52,14 +66,14 @@ export function NotificationProvider({ children }) {
     }
 
     const unsubNotif = wsClient.on('NOTIFICATION_CREATED', handleNewNotification)
-    const unsubOrder = wsClient.on('ORDER_STATUS_UPDATED', () => {
-      refreshNotifications()
-    })
+    const unsubOrder = wsClient.on('ORDER_STATUS_UPDATED', handleOrderStatusUpdate)
+    const unsubNewOrder = wsClient.on('NEW_ORDER', handleNewOrder)
     const unsubConnect = wsClient.on('_connected', handleReconnect)
 
     return () => {
       unsubNotif()
       unsubOrder()
+      unsubNewOrder()
       unsubConnect()
     }
   }, [isAuthenticated, refreshNotifications])
@@ -71,8 +85,8 @@ export function NotificationProvider({ children }) {
         prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
       )
       setUnreadCount((c) => Math.max(0, c - 1))
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error('Failed to mark notification as read:', err)
     }
   }
 
@@ -81,8 +95,8 @@ export function NotificationProvider({ children }) {
       await notificationService.markAllAsRead()
       setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })))
       setUnreadCount(0)
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error('Failed to mark all notifications as read:', err)
     }
   }
 
