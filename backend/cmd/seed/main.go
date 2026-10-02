@@ -58,36 +58,46 @@ func main() {
 	userRepo := repository.NewUserRepository(db)
 	menuRepo := repository.NewMenuRepository(db)
 
-	// 1. Seed Production Roles & Default Accounts (Idempotent)
-	defaultPassword := "password123"
-	hashedPassword, err := auth.HashPassword(defaultPassword)
+	// 1. Seed Production Cafeteria Admin Account (Idempotent)
+	adminEmail := cfg.AdminEmail
+	adminPassword := cfg.AdminPassword
+	adminName := "Cafeteria Admin"
+
+	hashedPassword, err := auth.HashPassword(adminPassword)
 	if err != nil {
-		log.Fatalf("Failed to hash password: %v", err)
+		log.Fatalf("Failed to hash admin password: %v", err)
 	}
 
-	users := []struct {
-		Name  string
-		Email string
-		Role  string
-	}{
-		{Name: "Student User", Email: "student@campusbite.com", Role: models.RoleStudent},
-		{Name: "Cafeteria Manager", Email: "admin@campusbite.com", Role: models.RoleAdmin},
-		{Name: "Campus Admin", Email: "admin@campusbite.internal", Role: models.RoleAdmin},
-	}
-
-	fmt.Println("--- Provisioning Users ---")
-	for _, u := range users {
-		existing, err := userRepo.GetByEmail(ctx, u.Email)
-		if err == nil && existing != nil {
-			fmt.Printf("✓ User '%s' (%s) [Role: %s] exists.\n", u.Name, u.Email, existing.Role)
-		} else {
-			created, err := userRepo.Create(ctx, u.Name, u.Email, hashedPassword, u.Role)
-			if err != nil {
-				log.Printf("Warning: Failed to provision user %s: %v", u.Email, err)
-			} else {
-				fmt.Printf("✓ Created user '%s' (%s) [Role: %s]\n", created.Name, created.Email, created.Role)
-			}
+	fmt.Println("--- Provisioning Production Admin Account ---")
+	existingAdmin, err := userRepo.GetByEmail(ctx, adminEmail)
+	if err == nil && existingAdmin != nil {
+		updateAdminQuery := `
+			UPDATE users
+			SET name = $1, role = $2, updated_at = NOW()
+			WHERE id = $3
+		`
+		if _, uErr := db.Pool.Exec(ctx, updateAdminQuery, adminName, models.RoleAdmin, existingAdmin.ID); uErr != nil {
+			log.Printf("Warning: Failed to update admin account: %v", uErr)
 		}
+		fmt.Printf("✓ Production Admin '%s' (%s) [Role: %s] verified.\n", adminName, adminEmail, models.RoleAdmin)
+	} else {
+		created, err := userRepo.Create(ctx, adminName, adminEmail, hashedPassword, models.RoleAdmin)
+		if err != nil {
+			log.Printf("Warning: Failed to provision admin user %s: %v", adminEmail, err)
+		} else {
+			fmt.Printf("✓ Created production admin '%s' (%s) [Role: %s]\n", created.Name, created.Email, created.Role)
+		}
+	}
+
+	// Clean up legacy demo user accounts if present and not matching configured admin
+	cleanupLegacyQuery := `
+		DELETE FROM users
+		WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal')
+		  AND email != $1
+		  AND id NOT IN (SELECT DISTINCT user_id FROM orders WHERE user_id IS NOT NULL)
+	`
+	if tag, err := db.Pool.Exec(ctx, cleanupLegacyQuery, adminEmail); err == nil && tag.RowsAffected() > 0 {
+		fmt.Printf("✓ Cleaned up %d legacy demo user account(s).\n", tag.RowsAffected())
 	}
 
 	// 2. Production Cafeteria Catalog Provisioning

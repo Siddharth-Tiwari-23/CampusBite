@@ -52,11 +52,11 @@ export function PaymentModal({
           </button>
           <div className="flex items-center space-x-2 text-orange-200 text-xs font-bold uppercase tracking-wider mb-1">
             <ShieldCheck className="w-4 h-4" />
-            <span>Razorpay Sandbox Gateway</span>
+            <span>Secure Payment Gateway</span>
           </div>
           <h3 className="text-xl font-black">CampusBite Checkout</h3>
           <p className="text-sm text-orange-100 mt-1">
-            Order ID: <span className="font-mono">{paymentDetails.order_id.slice(0, 8)}...</span>
+            Order ID: <span className="font-mono">#{paymentDetails.order_id.slice(0, 8)}</span>
           </p>
         </div>
 
@@ -64,15 +64,15 @@ export function PaymentModal({
         <div className="p-6 space-y-6">
           <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 flex justify-between items-center">
             <div>
-              <span className="text-xs text-gray-500 uppercase font-semibold">Total Amount</span>
+              <span className="text-xs text-gray-500 uppercase font-semibold">Total Payable</span>
               <p className="text-2xl font-black text-gray-900">₹{formattedAmount}</p>
             </div>
             <div className="text-right">
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
-                Test Mode
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
+                SSL Secured
               </span>
-              <p className="text-[10px] text-gray-400 mt-1 font-mono">
-                Key: {paymentDetails.key_id?.slice(0, 10)}...
+              <p className="text-[10px] text-gray-400 mt-1">
+                Instant Confirmation
               </p>
             </div>
           </div>
@@ -86,7 +86,7 @@ export function PaymentModal({
 
           <div className="space-y-3">
             <p className="text-xs text-gray-500 text-center">
-              This is a sandbox test payment environment. No real funds will be deducted.
+              Click below to complete and authorize payment for this order.
             </p>
 
             <button
@@ -97,10 +97,10 @@ export function PaymentModal({
               {isProcessing ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Verifying Transaction...</span>
+                  <span>Authorizing Payment...</span>
                 </>
               ) : (
-                <span>Pay ₹{formattedAmount} (Authorize Test)</span>
+                <span>Pay ₹{formattedAmount}</span>
               )}
             </button>
 

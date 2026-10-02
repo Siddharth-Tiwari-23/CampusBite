@@ -22,6 +22,8 @@ type Config struct {
 	IdempotencyCleanupInterval time.Duration
 	GeminiAPIKey               string
 	GeminiModel                string
+	AdminEmail                 string
+	AdminPassword              string
 }
 
 // Load loads configuration from environment variables and optional .env files.
@@ -95,6 +97,16 @@ func Load() (*Config, error) {
 		geminiModel = "gemini-2.5-flash"
 	}
 
+	adminEmail := os.Getenv("ADMIN_EMAIL")
+	if adminEmail == "" {
+		adminEmail = "admin@campusbite.com"
+	}
+
+	adminPassword := os.Getenv("ADMIN_PASSWORD")
+	if adminPassword == "" {
+		adminPassword = "password123"
+	}
+
 	return &Config{
 		DatabaseURL:                databaseURL,
 		RedisURL:                   redisURL,
@@ -108,5 +120,7 @@ func Load() (*Config, error) {
 		IdempotencyCleanupInterval: idempotencyCleanupInterval,
 		GeminiAPIKey:               geminiAPIKey,
 		GeminiModel:                geminiModel,
+		AdminEmail:                 adminEmail,
+		AdminPassword:              adminPassword,
 	}, nil
 }

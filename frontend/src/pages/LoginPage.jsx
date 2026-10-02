@@ -31,11 +31,6 @@ export function LoginPage({ onSuccess }) {
     }
   }
 
-  const fillDemoAccount = (demoEmail, demoPassword) => {
-    setIsRegisterMode(false)
-    setEmail(demoEmail)
-    setPassword(demoPassword)
-  }
 
   return (
     <div className="min-h-[85vh] flex items-center justify-center px-4 sm:px-6 lg:px-8 py-12">
@@ -166,29 +161,6 @@ export function LoginPage({ onSuccess }) {
               ? 'Already have an account? Sign in here'
               : "Don't have an account? Create one now"}
           </button>
-        </div>
-
-        {/* Quick Demo Logins */}
-        <div className="pt-4 border-t border-gray-100">
-          <p className="text-[11px] uppercase tracking-wider font-bold text-gray-400 text-center mb-2">
-            Demo Credentials
-          </p>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <button
-              onClick={() => fillDemoAccount('student@campusbite.com', 'password123')}
-              className="p-2 rounded-xl bg-gray-50 hover:bg-orange-50 hover:text-orange-700 text-gray-600 border border-gray-200 text-left transition-colors"
-            >
-              <p className="font-bold">Student User</p>
-              <p className="text-[10px] text-gray-400">student@campusbite.com</p>
-            </button>
-            <button
-              onClick={() => fillDemoAccount('admin@campusbite.com', 'password123')}
-              className="p-2 rounded-xl bg-gray-50 hover:bg-purple-50 hover:text-purple-700 text-gray-600 border border-gray-200 text-left transition-colors"
-            >
-              <p className="font-bold">Admin User</p>
-              <p className="text-[10px] text-gray-400">admin@campusbite.com</p>
-            </button>
-          </div>
         </div>
       </div>
     </div>
