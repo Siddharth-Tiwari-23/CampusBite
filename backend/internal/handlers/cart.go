@@ -52,7 +52,12 @@ func (h *CartHandler) AddToCart(c *gin.Context) {
 		return
 	}
 
-	if !isValidUUID(req.MenuItemID) {
+	menuItemID := req.MenuItemID
+	if menuItemID == "" && req.ItemID != "" {
+		menuItemID = req.ItemID
+	}
+
+	if !isValidUUID(menuItemID) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid menu item ID format"})
 		return
 	}
@@ -62,7 +67,7 @@ func (h *CartHandler) AddToCart(c *gin.Context) {
 		return
 	}
 
-	cart, err := h.cartRepo.AddItem(c.Request.Context(), userID, req.MenuItemID, req.Quantity)
+	cart, err := h.cartRepo.AddItem(c.Request.Context(), userID, menuItemID, req.Quantity)
 	if err != nil {
 		if errors.Is(err, repository.ErrMenuItemNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "menu item not found"})

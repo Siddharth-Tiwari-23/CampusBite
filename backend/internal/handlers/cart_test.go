@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -277,5 +278,89 @@ func TestCart_UpdateAndDelete(t *testing.T) {
 	}
 	if emptyCart.TotalAmount != 0 {
 		t.Errorf("expected total amount 0, got %f", emptyCart.TotalAmount)
+	}
+}
+
+func TestCart_UUIDValidationAndFieldCompatibility(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	_, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	menuRepo := repository.NewMenuRepository(db)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("UUIDTest_%d", time.Now().UnixNano()), "Test Item", 50.0, "/images/menu/veg_momos.jpg", true, 20)
+	if err != nil {
+		t.Fatalf("failed to create menu item: %v", err)
+	}
+
+	// 1. Invalid UUID in menu_item_id -> 400 "invalid menu item ID format"
+	invalidBody := []byte(`{"menu_item_id": "invalid-uuid-string", "quantity": 1}`)
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(invalidBody))
+	req1.Header.Set("Authorization", "Bearer "+studentToken)
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	router.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid menu_item_id UUID, got %d", w1.Code)
+	}
+	if !strings.Contains(w1.Body.String(), "invalid menu item ID format") {
+		t.Errorf("expected 'invalid menu item ID format' error, got %s", w1.Body.String())
+	}
+
+	// 2. Invalid UUID in item_id fallback -> 400 "invalid menu item ID format"
+	invalidBody2 := []byte(`{"item_id": "12345", "quantity": 1}`)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(invalidBody2))
+	req2.Header.Set("Authorization", "Bearer "+studentToken)
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid item_id UUID, got %d", w2.Code)
+	}
+	if !strings.Contains(w2.Body.String(), "invalid menu item ID format") {
+		t.Errorf("expected 'invalid menu item ID format' error, got %s", w2.Body.String())
+	}
+
+	// 3. Valid menu_item_id -> 200 OK with ImageURL populated
+	validBody := []byte(fmt.Sprintf(`{"menu_item_id": "%s", "quantity": 2}`, item.ID))
+	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(validBody))
+	req3.Header.Set("Authorization", "Bearer "+studentToken)
+	req3.Header.Set("Content-Type", "application/json")
+	w3 := httptest.NewRecorder()
+	router.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for valid menu_item_id, got %d: %s", w3.Code, w3.Body.String())
+	}
+	var cartResp models.CartResponse
+	if err := json.Unmarshal(w3.Body.Bytes(), &cartResp); err != nil {
+		t.Fatalf("failed to parse cart response: %v", err)
+	}
+	if len(cartResp.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(cartResp.Items))
+	}
+	if cartResp.Items[0].ImageURL != "/images/menu/veg_momos.jpg" {
+		t.Errorf("expected image_url '/images/menu/veg_momos.jpg', got '%s'", cartResp.Items[0].ImageURL)
+	}
+
+	// 4. Valid item_id fallback -> 200 OK
+	validBodyFallback := []byte(fmt.Sprintf(`{"item_id": "%s", "quantity": 1}`, item.ID))
+	req4 := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(validBodyFallback))
+	req4.Header.Set("Authorization", "Bearer "+studentToken)
+	req4.Header.Set("Content-Type", "application/json")
+	w4 := httptest.NewRecorder()
+	router.ServeHTTP(w4, req4)
+	if w4.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for valid item_id fallback, got %d: %s", w4.Code, w4.Body.String())
+	}
+
+	// 5. Update via PUT route -> 200 OK
+	updateBody := []byte(`{"quantity": 5}`)
+	req5 := httptest.NewRequest(http.MethodPut, "/api/v1/cart/items/"+item.ID, bytes.NewBuffer(updateBody))
+	req5.Header.Set("Authorization", "Bearer "+studentToken)
+	req5.Header.Set("Content-Type", "application/json")
+	w5 := httptest.NewRecorder()
+	router.ServeHTTP(w5, req5)
+	if w5.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for PUT update, got %d: %s", w5.Code, w5.Body.String())
 	}
 }

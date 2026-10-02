@@ -160,6 +160,7 @@ func SetupRouter(db *database.DB, tokenService *auth.TokenService, optionalServi
 			cartRoutes.DELETE("", cartHandler.ClearCart)
 			cartRoutes.POST("/items", cartHandler.AddToCart)
 			cartRoutes.PATCH("/items/:menuItemId", cartHandler.UpdateCartItem)
+			cartRoutes.PUT("/items/:menuItemId", cartHandler.UpdateCartItem)
 			cartRoutes.DELETE("/items/:menuItemId", cartHandler.DeleteCartItem)
 		}
 
