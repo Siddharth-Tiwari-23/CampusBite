@@ -60,7 +60,10 @@ func main() {
 
 	// 1. Seed Production Cafeteria Admin Account (Idempotent)
 	adminEmail := cfg.AdminEmail
-	adminPassword := cfg.AdminPassword
+	adminPassword := strings.TrimSpace(cfg.AdminPassword)
+	if adminPassword == "" {
+		log.Fatal("ADMIN_PASSWORD environment variable is required to provision the admin account. Please configure ADMIN_PASSWORD in your environment or .env file.")
+	}
 	adminName := "Cafeteria Admin"
 
 	hashedPassword, err := auth.HashPassword(adminPassword)
@@ -73,13 +76,13 @@ func main() {
 	if err == nil && existingAdmin != nil {
 		updateAdminQuery := `
 			UPDATE users
-			SET name = $1, role = $2, updated_at = NOW()
-			WHERE id = $3
+			SET name = $1, role = $2, password_hash = $3, updated_at = NOW()
+			WHERE id = $4
 		`
-		if _, uErr := db.Pool.Exec(ctx, updateAdminQuery, adminName, models.RoleAdmin, existingAdmin.ID); uErr != nil {
+		if _, uErr := db.Pool.Exec(ctx, updateAdminQuery, adminName, models.RoleAdmin, hashedPassword, existingAdmin.ID); uErr != nil {
 			log.Printf("Warning: Failed to update admin account: %v", uErr)
 		}
-		fmt.Printf("✓ Production Admin '%s' (%s) [Role: %s] verified.\n", adminName, adminEmail, models.RoleAdmin)
+		fmt.Printf("✓ Production Admin '%s' (%s) [Role: %s] updated/verified.\n", adminName, adminEmail, models.RoleAdmin)
 	} else {
 		created, err := userRepo.Create(ctx, adminName, adminEmail, hashedPassword, models.RoleAdmin)
 		if err != nil {
@@ -90,11 +93,35 @@ func main() {
 	}
 
 	// Clean up legacy demo user accounts if present and not matching configured admin
+	_, _ = db.Pool.Exec(ctx, `
+		DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal') AND email != $1)
+	`, adminEmail)
+	_, _ = db.Pool.Exec(ctx, `
+		DELETE FROM idempotency_keys WHERE user_id IN (SELECT id FROM users WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal') AND email != $1)
+	`, adminEmail)
+	_, _ = db.Pool.Exec(ctx, `
+		DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id IN (SELECT id FROM users WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal') AND email != $1))
+	`, adminEmail)
+	_, _ = db.Pool.Exec(ctx, `
+		DELETE FROM carts WHERE user_id IN (SELECT id FROM users WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal') AND email != $1)
+	`, adminEmail)
+	_, _ = db.Pool.Exec(ctx, `
+		DELETE FROM inventory_reservations WHERE order_id IN (SELECT id FROM orders WHERE user_id IN (SELECT id FROM users WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal') AND email != $1))
+	`, adminEmail)
+	_, _ = db.Pool.Exec(ctx, `
+		DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE user_id IN (SELECT id FROM users WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal') AND email != $1))
+	`, adminEmail)
+	_, _ = db.Pool.Exec(ctx, `
+		DELETE FROM payments WHERE order_id IN (SELECT id FROM orders WHERE user_id IN (SELECT id FROM users WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal') AND email != $1))
+	`, adminEmail)
+	_, _ = db.Pool.Exec(ctx, `
+		DELETE FROM orders WHERE user_id IN (SELECT id FROM users WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal') AND email != $1)
+	`, adminEmail)
+
 	cleanupLegacyQuery := `
 		DELETE FROM users
 		WHERE email IN ('student@campusbite.com', 'admin@campusbite.internal')
 		  AND email != $1
-		  AND id NOT IN (SELECT DISTINCT user_id FROM orders WHERE user_id IS NOT NULL)
 	`
 	if tag, err := db.Pool.Exec(ctx, cleanupLegacyQuery, adminEmail); err == nil && tag.RowsAffected() > 0 {
 		fmt.Printf("✓ Cleaned up %d legacy demo user account(s).\n", tag.RowsAffected())

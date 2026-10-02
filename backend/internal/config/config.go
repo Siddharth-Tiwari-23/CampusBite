@@ -103,9 +103,6 @@ func Load() (*Config, error) {
 	}
 
 	adminPassword := os.Getenv("ADMIN_PASSWORD")
-	if adminPassword == "" {
-		adminPassword = "password123"
-	}
 
 	return &Config{
 		DatabaseURL:                databaseURL,
