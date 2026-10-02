@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"campusbite/internal/auth"
+	"campusbite/internal/cache"
 	"campusbite/internal/config"
 	"campusbite/internal/database"
 	"campusbite/internal/models"
@@ -185,70 +186,73 @@ func main() {
 		},
 	}
 
-	fmt.Println("\n--- Cleaning Test Data & Provisioning Production Catalog ---")
+	fmt.Println("\n--- Provisioning Production Catalog & Archiving Test Data ---")
 
-	approvedNames := make([]string, len(productionCatalog))
-	for i, item := range productionCatalog {
-		approvedNames[i] = item.Name
-	}
-
-	// Archive any unapproved/test catalog records so they do not show up in the student catalog
-	archiveQuery := `
-		UPDATE menu_items
-		SET is_available = false, updated_at = NOW()
-		WHERE name != ALL($1) AND is_available = true
-	`
-	tag, err := db.Pool.Exec(ctx, archiveQuery, approvedNames)
-	if err != nil {
-		log.Printf("Warning: failed to archive non-production items: %v", err)
-	} else if tag.RowsAffected() > 0 {
-		fmt.Printf("✓ Archived %d non-production / test catalog records (set is_available = false).\n", tag.RowsAffected())
-	}
-
-	// Query all existing menu items (both available and archived)
-	existingItems, err := menuRepo.GetAll(ctx, false)
-	if err != nil {
-		log.Fatalf("Failed to query existing menu catalog: %v", err)
-	}
-
-	existingMap := make(map[string]models.MenuItem)
-	for _, m := range existingItems {
-		existingMap[m.Name] = m
-	}
+	var canonicalActiveIDs []string
 
 	for _, item := range productionCatalog {
-		if existing, found := existingMap[item.Name]; found {
-			// Item already exists: update image_url and ensure is_available = true without overwriting admin price if set
+		var existingID string
+		var existingPrice float64
+		queryExisting := `
+			SELECT id, price FROM menu_items WHERE name = $1 ORDER BY created_at ASC LIMIT 1
+		`
+		err := db.Pool.QueryRow(ctx, queryExisting, item.Name).Scan(&existingID, &existingPrice)
+		if err == nil {
+			// Item exists: update image_url, description, price, and mark available
 			updateQuery := `
 				UPDATE menu_items
-				SET image_url = $1, is_available = true, updated_at = NOW()
-				WHERE id = $2
+				SET description = $1, price = $2, image_url = $3, is_available = true, updated_at = NOW()
+				WHERE id = $4
 			`
-			if _, uErr := db.Pool.Exec(ctx, updateQuery, item.ImageURL, existing.ID); uErr != nil {
-				log.Printf("Warning: failed to update image_url for %s: %v", item.Name, uErr)
+			if _, uErr := db.Pool.Exec(ctx, updateQuery, item.Description, item.Price, item.ImageURL, existingID); uErr != nil {
+				log.Printf("Warning: failed to update item %s: %v", item.Name, uErr)
 			}
 
-			// Ensure inventory row exists without resetting existing non-zero quantity
+			// Ensure inventory row exists and has at least target stock
 			invQuery := `
 				INSERT INTO inventory (menu_item_id, quantity)
 				VALUES ($1, $2)
-				ON CONFLICT (menu_item_id) DO NOTHING
+				ON CONFLICT (menu_item_id) DO UPDATE SET quantity = GREATEST(inventory.quantity, EXCLUDED.quantity)
 			`
-			_, err = db.Pool.Exec(ctx, invQuery, existing.ID, item.Stock)
-			if err != nil {
-				log.Printf("Warning: failed to verify inventory for %s: %v", item.Name, err)
+			if _, invErr := db.Pool.Exec(ctx, invQuery, existingID, item.Stock); invErr != nil {
+				log.Printf("Warning: failed to verify inventory for %s: %v", item.Name, invErr)
 			}
-			fmt.Printf("✓ Verified production item: %-28s (₹%.2f, Image: %s)\n", item.Name, existing.Price, item.ImageURL)
+			canonicalActiveIDs = append(canonicalActiveIDs, existingID)
+			fmt.Printf("✓ Verified production item: %-28s (₹%.2f, Image: %s, ID: %s)\n", item.Name, item.Price, item.ImageURL, existingID)
 		} else {
 			// Insert new item and its initial inventory record
 			created, err := menuRepo.Create(ctx, item.Name, item.Description, item.Price, item.ImageURL, true, item.Stock)
 			if err != nil {
 				log.Printf("Warning: Failed to create menu item %s: %v", item.Name, err)
 			} else {
-				fmt.Printf("✓ Provisioned item:        %-28s (₹%.2f, Stock: %d, Image: %s)\n", created.Name, created.Price, item.Stock, created.ImageURL)
+				canonicalActiveIDs = append(canonicalActiveIDs, created.ID)
+				fmt.Printf("✓ Provisioned item:        %-28s (₹%.2f, Stock: %d, Image: %s, ID: %s)\n", created.Name, created.Price, item.Stock, created.ImageURL, created.ID)
 			}
 		}
 	}
 
-	fmt.Println("\nProduction catalog provisioning completed successfully!")
+	// Archive any non-canonical / test catalog records by ID
+	archiveQuery := `
+		UPDATE menu_items
+		SET is_available = false, updated_at = NOW()
+		WHERE id != ALL($1) AND is_available = true
+	`
+	tag, err := db.Pool.Exec(ctx, archiveQuery, canonicalActiveIDs)
+	if err != nil {
+		log.Printf("Warning: failed to archive non-production items: %v", err)
+	} else if tag.RowsAffected() > 0 {
+		fmt.Printf("✓ Archived %d non-production / test catalog records (set is_available = false).\n", tag.RowsAffected())
+	}
+
+	// Invalidate Redis menu cache so changes are immediately active
+	if redisCache, err := cache.NewRedisCache(cfg.RedisURL); err == nil {
+		_ = redisCache.Del(ctx, cache.KeyMenuAvailable)
+		fmt.Printf("✓ Invalidated Redis menu cache key '%s'.\n", cache.KeyMenuAvailable)
+	}
+
+	var activeCount, totalCount int
+	_ = db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM menu_items WHERE is_available = true").Scan(&activeCount)
+	_ = db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM menu_items").Scan(&totalCount)
+	fmt.Printf("\n✓ Production catalog converged: %d active items (Total in DB: %d)\n", activeCount, totalCount)
+	fmt.Println("Production catalog provisioning completed successfully!")
 }
