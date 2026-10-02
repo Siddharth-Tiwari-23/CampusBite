@@ -1,9 +1,11 @@
 # ==========================================
 # Stage 1: Build Stage
 # ==========================================
-FROM golang:1.24-alpine AS builder
+FROM golang:1.24-alpine3.21 AS builder
 
 WORKDIR /app
+
+ENV GOTOOLCHAIN=auto
 
 # Install git and ca-certificates for fetching dependencies
 RUN apk add --no-cache git ca-certificates tzdata
