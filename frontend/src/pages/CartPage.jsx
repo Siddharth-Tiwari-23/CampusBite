@@ -31,8 +31,7 @@ export function CartPage({ onNavigateToMenu, onOrderCreated }) {
     (sum, item) => sum + (item.price || item.menu_item?.price || 0) * (item.quantity || 0),
     0
   )
-  const tax = subtotal * 0.05 // 5% campus dining GST
-  const total = subtotal + tax
+  const total = subtotal
 
   const handleCheckout = async () => {
     if (items.length === 0) return
@@ -236,10 +235,6 @@ export function CartPage({ onNavigateToMenu, onOrderCreated }) {
             <div className="flex justify-between">
               <span>Subtotal</span>
               <span className="font-semibold text-gray-900">₹{subtotal.toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Campus Dining Tax (5%)</span>
-              <span className="font-semibold text-gray-900">₹{tax.toFixed(2)}</span>
             </div>
             <div className="pt-3 border-t border-gray-100 flex justify-between items-baseline">
               <span className="font-bold text-gray-900 text-base">Grand Total</span>

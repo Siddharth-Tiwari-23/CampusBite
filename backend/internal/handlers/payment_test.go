@@ -483,3 +483,74 @@ func TestPayment_ConcurrentWebhookAndVerifyRace(t *testing.T) {
 		t.Errorf("expected final payment status SUCCESS, got %s", finalPayment.Status)
 	}
 }
+
+func TestPayment_ExactAmountVerification_30INR(t *testing.T) {
+	testKeySecret := "rzp_test_campusbite_mock_secret"
+	rzpService := service.NewRazorpayService("rzp_test_campusbite_mock_key", testKeySecret, "rzp_test_campusbite_mock_webhook_secret")
+
+	db, tokenService := func() (*database.DB, *auth.TokenService) {
+		routerTemp, db, ts := setupIntegrationApp(t)
+		_ = routerTemp
+		return db, ts
+	}()
+	defer db.Close()
+
+	router := routes.SetupRouter(db, tokenService, rzpService, cache.NewNoOpCache())
+
+	user, token := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	// Create item with price exactly 30.00 INR
+	menuRepo := repository.NewMenuRepository(db)
+	itemPrice := 30.00
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Chai_Test_%d", time.Now().UnixNano()), "Hot Chai", itemPrice, "", true, 50)
+	if err != nil {
+		t.Fatalf("failed to create menu item: %v", err)
+	}
+
+	cartRepo := repository.NewCartRepository(db)
+	_, err = cartRepo.AddItem(context.Background(), user.ID, item.ID, 1)
+	if err != nil {
+		t.Fatalf("failed to add item to cart: %v", err)
+	}
+
+	// Checkout via POST /api/v1/orders
+	idempotencyKey := fmt.Sprintf("order-key-30-%d", time.Now().UnixNano())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Idempotency-Key", idempotencyKey)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("failed to checkout order: status %d, body %s", w.Code, w.Body.String())
+	}
+
+	var orderResp models.OrderResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &orderResp); err != nil {
+		t.Fatalf("failed to decode order response: %v", err)
+	}
+
+	if orderResp.TotalAmount != 30.00 {
+		t.Fatalf("expected order TotalAmount to be exactly 30.00, got %.2f", orderResp.TotalAmount)
+	}
+
+	// Create Payment Order
+	reqPay := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/orders/%s/payment", orderResp.ID), nil)
+	reqPay.Header.Set("Authorization", "Bearer "+token)
+	wPay := httptest.NewRecorder()
+	router.ServeHTTP(wPay, reqPay)
+
+	if wPay.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for payment order creation, got %d: %s", wPay.Code, wPay.Body.String())
+	}
+
+	var paymentResp models.CreatePaymentOrderResponse
+	if err := json.Unmarshal(wPay.Body.Bytes(), &paymentResp); err != nil {
+		t.Fatalf("failed to parse payment response: %v", err)
+	}
+
+	if paymentResp.Amount != 3000 {
+		t.Fatalf("expected Razorpay payment amount to be exactly 3000 paise (30.00 INR), got %d paise", paymentResp.Amount)
+	}
+}
+
