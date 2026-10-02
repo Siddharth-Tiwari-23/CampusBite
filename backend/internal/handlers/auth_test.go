@@ -25,6 +25,21 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
+var canonicalProductionMenuNames = []string{
+	"Veg Momos (10 pcs)",
+	"Paneer Momos (10 pcs)",
+	"Hot Coffee (Coffee Special)",
+	"Cold Coffee",
+	"Chai Special",
+	"Paneer Paratha (2 pcs)",
+	"Aloo Paratha (2 pcs)",
+	"Veg Samosa",
+	"French Fries Plate",
+	"Pasta Sada (1 plate)",
+	"Veg Pizza (1 pc)",
+	"Spring Roll (2 pcs)",
+}
+
 func setupIntegrationApp(t *testing.T) (*gin.Engine, *database.DB, *auth.TokenService) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -43,6 +58,16 @@ func setupIntegrationApp(t *testing.T) (*gin.Engine, *database.DB, *auth.TokenSe
 	if err != nil {
 		t.Fatalf("failed to create token service: %v", err)
 	}
+
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cleanupCancel()
+		_, _ = db.Pool.Exec(cleanupCtx, `
+			UPDATE menu_items
+			SET is_available = false, updated_at = NOW()
+			WHERE name != ALL($1) AND is_available = true
+		`, canonicalProductionMenuNames)
+	})
 
 	router := routes.SetupRouter(db, tokenService, cache.NewNoOpCache())
 	return router, db, tokenService

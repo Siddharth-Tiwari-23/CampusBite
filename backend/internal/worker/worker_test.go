@@ -68,6 +68,10 @@ func createTestUserAndOrder(t *testing.T, db *database.DB, initialStock, orderQt
 		t.Fatalf("failed to create menu item: %v", err)
 	}
 
+	t.Cleanup(func() {
+		_, _ = db.Pool.Exec(context.Background(), "UPDATE menu_items SET is_available = false WHERE id = $1", item.ID)
+	})
+
 	// Add to cart
 	_, err = cartRepo.AddItem(ctx, user.ID, item.ID, orderQty)
 	if err != nil {
