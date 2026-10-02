@@ -336,8 +336,13 @@ function getCategoryForItem(item) {
                           <span className="font-mono text-xs font-bold text-gray-400">
                             #{order.id.slice(0, 8)}
                           </span>
-                          <h4 className="font-bold text-gray-900 text-sm mt-0.5">
+                          <h4 className="font-bold text-gray-900 text-sm mt-0.5 flex items-center">
                             ₹{order.total_amount.toFixed(2)}
+                            {order.payment_method === 'COD' && (
+                              <span className="text-[10px] text-amber-800 bg-amber-100 font-bold px-1.5 py-0.5 rounded-md ml-1.5">
+                                COD
+                              </span>
+                            )}
                           </h4>
                         </div>
                         <span

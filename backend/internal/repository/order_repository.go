@@ -58,7 +58,7 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, ide
 	paymentMethod := "ONLINE"
 	if len(paymentMethodOption) > 0 && strings.TrimSpace(paymentMethodOption[0]) != "" {
 		m := strings.ToUpper(strings.TrimSpace(paymentMethodOption[0]))
-		if m == "COD" || m == "CASH_ON_DELIVERY" {
+		if m == "COD" || m == "CASH_ON_DELIVERY" || m == "CASH" || m == "CASH ON DELIVERY" {
 			paymentMethod = "COD"
 		}
 	}
@@ -225,6 +225,8 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, ide
 	order.UserID = userID
 	order.Status = initialOrderStatus
 	order.TotalAmount = totalAmount
+	order.PaymentMethod = paymentMethod
+	order.PaymentStatus = string(models.PaymentStatusPending)
 
 	err = tx.QueryRow(ctx, insertOrderQuery, userID, initialOrderStatus, totalAmount).
 		Scan(&order.ID, &order.CreatedAt, &order.UpdatedAt)
@@ -413,12 +415,22 @@ func (r *OrderRepository) recordIdempotencyFailure(ctx context.Context, userID, 
 // GetByID retrieves a single order and its items by order ID.
 func (r *OrderRepository) GetByID(ctx context.Context, orderID string) (*models.OrderResponse, error) {
 	orderQuery := `
-		SELECT id, user_id, status, total_amount, created_at, updated_at
-		FROM orders
-		WHERE id = $1
+		SELECT 
+			o.id, 
+			o.user_id, 
+			o.status, 
+			o.total_amount, 
+			o.created_at, 
+			o.updated_at,
+			COALESCE(p.provider_order_id, ''),
+			COALESCE(p.status, '')
+		FROM orders o
+		LEFT JOIN payments p ON p.order_id = o.id
+		WHERE o.id = $1
 	`
 
 	var order models.OrderResponse
+	var providerOrderID, paymentStatus string
 	err := r.db.Pool.QueryRow(ctx, orderQuery, orderID).Scan(
 		&order.ID,
 		&order.UserID,
@@ -426,6 +438,8 @@ func (r *OrderRepository) GetByID(ctx context.Context, orderID string) (*models.
 		&order.TotalAmount,
 		&order.CreatedAt,
 		&order.UpdatedAt,
+		&providerOrderID,
+		&paymentStatus,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -433,6 +447,15 @@ func (r *OrderRepository) GetByID(ctx context.Context, orderID string) (*models.
 		}
 		return nil, fmt.Errorf("failed to get order: %w", err)
 	}
+
+	if providerOrderID == "COD" {
+		order.PaymentMethod = "COD"
+	} else if providerOrderID != "" {
+		order.PaymentMethod = "ONLINE"
+	} else {
+		order.PaymentMethod = "ONLINE"
+	}
+	order.PaymentStatus = paymentStatus
 
 	items, err := r.getOrderItems(ctx, order.ID)
 	if err != nil {
@@ -487,10 +510,19 @@ func (r *OrderRepository) GetReservationsByOrderID(ctx context.Context, orderID 
 // ListByUserID retrieves all orders placed by a specific user.
 func (r *OrderRepository) ListByUserID(ctx context.Context, userID string) ([]models.OrderResponse, error) {
 	query := `
-		SELECT id, user_id, status, total_amount, created_at, updated_at
-		FROM orders
-		WHERE user_id = $1
-		ORDER BY created_at DESC
+		SELECT 
+			o.id, 
+			o.user_id, 
+			o.status, 
+			o.total_amount, 
+			o.created_at, 
+			o.updated_at,
+			COALESCE(p.provider_order_id, ''),
+			COALESCE(p.status, '')
+		FROM orders o
+		LEFT JOIN payments p ON p.order_id = o.id
+		WHERE o.user_id = $1
+		ORDER BY o.created_at DESC
 	`
 
 	return r.queryOrders(ctx, query, userID)
@@ -499,9 +531,18 @@ func (r *OrderRepository) ListByUserID(ctx context.Context, userID string) ([]mo
 // ListAll retrieves all orders in the system (for ADMIN use).
 func (r *OrderRepository) ListAll(ctx context.Context) ([]models.OrderResponse, error) {
 	query := `
-		SELECT id, user_id, status, total_amount, created_at, updated_at
-		FROM orders
-		ORDER BY created_at DESC
+		SELECT 
+			o.id, 
+			o.user_id, 
+			o.status, 
+			o.total_amount, 
+			o.created_at, 
+			o.updated_at,
+			COALESCE(p.provider_order_id, ''),
+			COALESCE(p.status, '')
+		FROM orders o
+		LEFT JOIN payments p ON p.order_id = o.id
+		ORDER BY o.created_at DESC
 	`
 
 	return r.queryOrders(ctx, query)
@@ -517,6 +558,7 @@ func (r *OrderRepository) queryOrders(ctx context.Context, query string, args ..
 	orders := make([]models.OrderResponse, 0)
 	for rows.Next() {
 		var o models.OrderResponse
+		var providerOrderID, paymentStatus string
 		if err := rows.Scan(
 			&o.ID,
 			&o.UserID,
@@ -524,9 +566,19 @@ func (r *OrderRepository) queryOrders(ctx context.Context, query string, args ..
 			&o.TotalAmount,
 			&o.CreatedAt,
 			&o.UpdatedAt,
+			&providerOrderID,
+			&paymentStatus,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan order: %w", err)
 		}
+		if providerOrderID == "COD" {
+			o.PaymentMethod = "COD"
+		} else if providerOrderID != "" {
+			o.PaymentMethod = "ONLINE"
+		} else {
+			o.PaymentMethod = "ONLINE"
+		}
+		o.PaymentStatus = paymentStatus
 		orders = append(orders, o)
 	}
 

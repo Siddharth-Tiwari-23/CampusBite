@@ -23,12 +23,14 @@ type OrderItemResponse struct {
 
 // OrderResponse represents an order with snapshot items and server total.
 type OrderResponse struct {
-	ID           string                 `json:"id"`
-	UserID       string                 `json:"user_id"`
-	Status       string                 `json:"status"`
-	TotalAmount  float64                `json:"total_amount"`
-	CreatedAt    time.Time              `json:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at"`
-	Items        []OrderItemResponse    `json:"items"`
-	Reservations []InventoryReservation `json:"reservations,omitempty"`
+	ID            string                 `json:"id"`
+	UserID        string                 `json:"user_id"`
+	Status        string                 `json:"status"`
+	PaymentMethod string                 `json:"payment_method,omitempty"`
+	PaymentStatus string                 `json:"payment_status,omitempty"`
+	TotalAmount   float64                `json:"total_amount"`
+	CreatedAt     time.Time              `json:"created_at"`
+	UpdatedAt     time.Time              `json:"updated_at"`
+	Items         []OrderItemResponse    `json:"items"`
+	Reservations  []InventoryReservation `json:"reservations,omitempty"`
 }

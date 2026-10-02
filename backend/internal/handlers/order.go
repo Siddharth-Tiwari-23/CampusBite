@@ -56,7 +56,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	}
 
 	var req createOrderRequest
-	if c.Request.Body != nil && c.Request.ContentLength > 0 {
+	if c.Request.Body != nil {
 		_ = c.ShouldBindJSON(&req)
 	}
 

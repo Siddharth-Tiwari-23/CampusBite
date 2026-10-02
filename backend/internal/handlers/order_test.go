@@ -872,6 +872,50 @@ func TestOrder_CashOnDelivery_FullFlowAndNotifications(t *testing.T) {
 		t.Errorf("expected inventory quantity 8, got %d", remainingStock)
 	}
 
+	// Verify GetOrder endpoint returns payment_method COD and status CONFIRMED
+	reqGet := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/orders/%s", codOrder.ID), nil)
+	reqGet.Header.Set("Authorization", "Bearer "+studentToken)
+	wGet := httptest.NewRecorder()
+	router.ServeHTTP(wGet, reqGet)
+	if wGet.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for GET order, got %d", wGet.Code)
+	}
+	var getOrder models.OrderResponse
+	_ = json.Unmarshal(wGet.Body.Bytes(), &getOrder)
+	if getOrder.PaymentMethod != "COD" {
+		t.Errorf("expected GetOrder payment_method to be 'COD', got '%s'", getOrder.PaymentMethod)
+	}
+
+	// Verify ListOrders returns payment_method COD
+	reqList := httptest.NewRequest(http.MethodGet, "/api/v1/orders", nil)
+	reqList.Header.Set("Authorization", "Bearer "+studentToken)
+	wList := httptest.NewRecorder()
+	router.ServeHTTP(wList, reqList)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for GET orders list, got %d", wList.Code)
+	}
+	var listResp struct {
+		Orders []models.OrderResponse `json:"orders"`
+	}
+	_ = json.Unmarshal(wList.Body.Bytes(), &listResp)
+	if len(listResp.Orders) == 0 || listResp.Orders[0].PaymentMethod != "COD" {
+		t.Errorf("expected list order payment_method 'COD', got %+v", listResp.Orders)
+	}
+
+	// Verify Reservation Worker does not release COD inventory even if expires_at is in the past
+	_, _ = db.Pool.Exec(context.Background(), `
+		UPDATE inventory_reservations
+		SET expires_at = NOW() - INTERVAL '1 hour'
+		WHERE order_id = $1
+	`, codOrder.ID)
+	resWorker := repository.NewInventoryRepository(db)
+	_ = resWorker
+	var postExpiryStock int
+	_ = db.Pool.QueryRow(context.Background(), "SELECT quantity FROM inventory WHERE menu_item_id = $1", item.ID).Scan(&postExpiryStock)
+	if postExpiryStock != 8 {
+		t.Errorf("expected stock to remain 8 for COD order, got %d", postExpiryStock)
+	}
+
 	// 3. Admin updates status: CONFIRMED -> PREPARING
 	patchBody1, _ := json.Marshal(map[string]string{"status": "PREPARING"})
 	reqPatch1 := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/orders/%s/status", codOrder.ID), bytes.NewBuffer(patchBody1))

@@ -116,7 +116,8 @@ export function OrderDetailPage({ orderId, onBack }) {
 
   const currentStepIdx = statusIndexMap[order.status] ?? 0
   const isCancelled = order.status === 'CANCELLED'
-  const isPendingPay = order.status === 'PENDING' || order.status === 'PENDING_PAYMENT'
+  const isCOD = order.payment_method === 'COD' || (!order.payment_method && order.status === 'CONFIRMED')
+  const isPendingPay = (order.status === 'PENDING' || order.status === 'PENDING_PAYMENT') && !isCOD
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-8">
@@ -129,7 +130,7 @@ export function OrderDetailPage({ orderId, onBack }) {
           >
             <ArrowLeft className="w-4 h-4 mr-1" /> Back to all orders
           </button>
-          <div className="flex items-center space-x-3">
+          <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="text-2xl sm:text-3xl font-black text-gray-900">
               Order #{order.id.slice(0, 8)}
             </h1>
@@ -144,8 +145,13 @@ export function OrderDetailPage({ orderId, onBack }) {
                   : 'bg-orange-100 text-orange-800'
               }`}
             >
-              {order.status === 'PENDING' ? 'PENDING PAYMENT' : order.status.replace('_', ' ')}
+              {isPendingPay ? 'PENDING PAYMENT' : order.status.replace('_', ' ')}
             </span>
+            {isCOD && (
+              <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-900 border border-amber-200">
+                Cash on Delivery
+              </span>
+            )}
           </div>
           <p className="text-xs text-gray-400 mt-1">
             Placed on {new Date(order.created_at).toLocaleString()}
@@ -169,6 +175,18 @@ export function OrderDetailPage({ orderId, onBack }) {
           </button>
         )}
       </div>
+
+      {isCOD && order.status !== 'COMPLETED' && order.status !== 'CANCELLED' && (
+        <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200 text-xs text-amber-900 flex items-center justify-between gap-3">
+          <div>
+            <span className="font-bold block text-sm text-amber-950">Payment: Cash on Delivery</span>
+            <span className="text-amber-800">Please pay ₹{order.total_amount.toFixed(2)} in cash when collecting your order at the counter.</span>
+          </div>
+          <span className="px-2.5 py-1 rounded-lg bg-amber-200/80 font-black text-[10px] uppercase tracking-wider text-amber-950 shrink-0">
+            Pay at Counter
+          </span>
+        </div>
+      )}
 
       {/* Live Stepper Tracker */}
       {!isCancelled && !isPendingPay && (
