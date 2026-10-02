@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { ShieldCheck, Loader2, AlertCircle, X, CreditCard } from 'lucide-react'
+import { ShieldCheck, Loader2, AlertCircle, X, CreditCard, CheckCircle2 } from 'lucide-react'
 import { paymentService } from '../services/paymentService'
 
 export function PaymentModal({
@@ -8,6 +8,7 @@ export function PaymentModal({
   paymentDetails,
   onSuccess,
 }) {
+  const [paymentMethod, setPaymentMethod] = useState('ONLINE')
   const [isProcessing, setIsProcessing] = useState(false)
   const [error, setError] = useState(null)
 
@@ -75,6 +76,14 @@ export function PaymentModal({
     }
   }
 
+  const handlePlaceCODOrder = () => {
+    setIsProcessing(true)
+    setTimeout(() => {
+      setIsProcessing(false)
+      onSuccess(paymentDetails.order_id)
+    }, 300)
+  }
+
   const formattedAmount = (paymentDetails.amount / 100).toFixed(2)
 
   return (
@@ -91,7 +100,7 @@ export function PaymentModal({
           </button>
           <div className="flex items-center space-x-2 text-orange-200 text-xs font-bold uppercase tracking-wider mb-1">
             <ShieldCheck className="w-4 h-4" />
-            <span>Secure Payment Gateway</span>
+            <span>Secure Cafeteria Checkout</span>
           </div>
           <h3 className="text-xl font-black">CampusBite Checkout</h3>
           <p className="text-sm text-orange-100 mt-1">
@@ -100,7 +109,7 @@ export function PaymentModal({
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-5">
           <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 flex justify-between items-center">
             <div>
               <span className="text-xs text-gray-500 uppercase font-semibold">Total Payable</span>
@@ -116,6 +125,50 @@ export function PaymentModal({
             </div>
           </div>
 
+          {/* Payment Method Selection */}
+          <div className="space-y-2">
+            <label className="block text-xs font-bold uppercase tracking-wider text-gray-600">
+              Payment Method
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <label
+                className={`p-3 rounded-xl border flex items-center space-x-2.5 cursor-pointer transition-all ${
+                  paymentMethod === 'ONLINE'
+                    ? 'border-orange-500 bg-orange-50/60 ring-2 ring-orange-500/20 text-orange-950 font-bold'
+                    : 'border-gray-200 bg-gray-50/50 hover:bg-gray-50 text-gray-700 font-medium'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="modal_payment_method"
+                  value="ONLINE"
+                  checked={paymentMethod === 'ONLINE'}
+                  onChange={() => setPaymentMethod('ONLINE')}
+                  className="text-orange-600 focus:ring-orange-500"
+                />
+                <span className="text-xs">Online Payment</span>
+              </label>
+
+              <label
+                className={`p-3 rounded-xl border flex items-center space-x-2.5 cursor-pointer transition-all ${
+                  paymentMethod === 'COD'
+                    ? 'border-orange-500 bg-orange-50/60 ring-2 ring-orange-500/20 text-orange-950 font-bold'
+                    : 'border-gray-200 bg-gray-50/50 hover:bg-gray-50 text-gray-700 font-medium'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="modal_payment_method"
+                  value="COD"
+                  checked={paymentMethod === 'COD'}
+                  onChange={() => setPaymentMethod('COD')}
+                  className="text-orange-600 focus:ring-orange-500"
+                />
+                <span className="text-xs">Cash on Delivery</span>
+              </label>
+            </div>
+          </div>
+
           {error && (
             <div className="p-3 bg-red-50 text-red-700 text-sm rounded-xl flex items-start space-x-2 border border-red-100">
               <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-red-500" />
@@ -123,33 +176,61 @@ export function PaymentModal({
             </div>
           )}
 
-          <div className="space-y-3">
-            <p className="text-xs text-gray-500 text-center">
-              Click below to proceed to Razorpay secure checkout.
-            </p>
+          <div className="space-y-3 pt-1">
+            {paymentMethod === 'ONLINE' ? (
+              <>
+                <p className="text-xs text-gray-500 text-center">
+                  Click below to proceed to Razorpay secure checkout.
+                </p>
 
-            <button
-              onClick={handleOpenRazorpay}
-              disabled={isProcessing}
-              className="w-full py-3.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-200 transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
-            >
-              {isProcessing ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Verifying Transaction...</span>
-                </>
-              ) : (
-                <>
-                  <CreditCard className="w-4 h-4" />
-                  <span>Pay ₹{formattedAmount}</span>
-                </>
-              )}
-            </button>
+                <button
+                  onClick={handleOpenRazorpay}
+                  disabled={isProcessing}
+                  className="w-full py-3.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-200 transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
+                >
+                  {isProcessing ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <span>Verifying Transaction...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CreditCard className="w-4 h-4" />
+                      <span>Pay ₹{formattedAmount}</span>
+                    </>
+                  )}
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="p-3.5 bg-amber-50 rounded-xl border border-amber-100 text-xs text-amber-900 font-medium text-center">
+                  Pay cash when you collect your order.
+                </div>
+
+                <button
+                  onClick={handlePlaceCODOrder}
+                  disabled={isProcessing}
+                  className="w-full py-3.5 px-4 bg-orange-600 hover:bg-orange-700 text-white font-bold rounded-xl shadow-lg shadow-orange-200 transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
+                >
+                  {isProcessing ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <span>Confirming Order...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Place COD Order</span>
+                    </>
+                  )}
+                </button>
+              </>
+            )}
 
             <button
               onClick={onClose}
               disabled={isProcessing}
-              className="w-full py-2.5 text-xs text-gray-500 hover:text-gray-700 font-medium transition-colors"
+              className="w-full py-2 text-xs text-gray-500 hover:text-gray-700 font-medium transition-colors"
             >
               Cancel Payment
             </button>

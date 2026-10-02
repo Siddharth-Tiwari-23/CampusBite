@@ -749,3 +749,180 @@ func TestOrder_DifferentKeysSeparateOperations(t *testing.T) {
 		t.Errorf("expected 2 orders in DB, got %d", totalOrders)
 	}
 }
+
+func TestOrder_CashOnDelivery_FullFlowAndNotifications(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	student, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+	_, adminToken := createRealTestUser(t, db, tokenService, models.RoleAdmin)
+
+	menuRepo := repository.NewMenuRepository(db)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("VegBurger_%d", time.Now().UnixNano()), "Veg Burger Deluxe", 45.0, "", true, 10)
+	if err != nil {
+		t.Fatalf("failed to seed item: %v", err)
+	}
+
+	// 1. Add item to cart (quantity: 2)
+	addPayload, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 2})
+	reqAdd := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(addPayload))
+	reqAdd.Header.Set("Authorization", "Bearer "+studentToken)
+	reqAdd.Header.Set("Content-Type", "application/json")
+	wAdd := httptest.NewRecorder()
+	router.ServeHTTP(wAdd, reqAdd)
+	if wAdd.Code != http.StatusOK {
+		t.Fatalf("failed to add item to cart: %d: %s", wAdd.Code, wAdd.Body.String())
+	}
+
+	// 2. Checkout with PaymentMethod = "COD"
+	idempKey := fmt.Sprintf("cod_test_%d", time.Now().UnixNano())
+	codOrderBody, _ := json.Marshal(map[string]interface{}{
+		"payment_method":       "COD",
+		"special_instructions": "Extra sauce please",
+	})
+	reqOrder := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBuffer(codOrderBody))
+	reqOrder.Header.Set("Authorization", "Bearer "+studentToken)
+	reqOrder.Header.Set("Idempotency-Key", idempKey)
+	reqOrder.Header.Set("Content-Type", "application/json")
+	wOrder := httptest.NewRecorder()
+	router.ServeHTTP(wOrder, reqOrder)
+
+	if wOrder.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for COD order, got %d: %s", wOrder.Code, wOrder.Body.String())
+	}
+
+	var codOrder models.OrderResponse
+	if err := json.Unmarshal(wOrder.Body.Bytes(), &codOrder); err != nil {
+		t.Fatalf("failed to unmarshal COD order response: %v", err)
+	}
+
+	// Verify order status is CONFIRMED
+	if codOrder.Status != models.OrderStatusConfirmed {
+		t.Errorf("expected COD order status to be CONFIRMED, got %s", codOrder.Status)
+	}
+
+	// Verify reservations are marked CONSUMED
+	for _, res := range codOrder.Reservations {
+		if res.Status != models.ReservationStatusConsumed {
+			t.Errorf("expected reservation status to be CONSUMED for COD order, got %s", res.Status)
+		}
+	}
+
+	// Verify payment record in DB has status PENDING and provider_order_id = 'COD'
+	var paymentStatus, providerOrderID string
+	var paymentAmount float64
+	err = db.Pool.QueryRow(context.Background(), `
+		SELECT status, provider_order_id, amount
+		FROM payments
+		WHERE order_id = $1
+	`, codOrder.ID).Scan(&paymentStatus, &providerOrderID, &paymentAmount)
+	if err != nil {
+		t.Fatalf("failed to query payment record for COD order: %v", err)
+	}
+	if paymentStatus != string(models.PaymentStatusPending) {
+		t.Errorf("expected COD payment record status to be PENDING, got %s", paymentStatus)
+	}
+	if providerOrderID != "COD" {
+		t.Errorf("expected provider_order_id to be 'COD', got %s", providerOrderID)
+	}
+	if paymentAmount != 90.0 {
+		t.Errorf("expected payment amount to be 90.0, got %f", paymentAmount)
+	}
+
+	// Verify confirmation notification was persisted
+	var notifCount int
+	var notifTitle, notifMsg string
+	err = db.Pool.QueryRow(context.Background(), `
+		SELECT COUNT(*), title, message
+		FROM notifications
+		WHERE user_id = $1
+		GROUP BY title, message
+	`, student.ID).Scan(&notifCount, &notifTitle, &notifMsg)
+	if err != nil {
+		t.Fatalf("failed to query notification for COD order: %v", err)
+	}
+	if notifTitle != "Order Confirmed" {
+		t.Errorf("expected notification title 'Order Confirmed', got '%s'", notifTitle)
+	}
+	if !strings.Contains(notifMsg, "has been confirmed") {
+		t.Errorf("expected notification message to contain 'has been confirmed', got '%s'", notifMsg)
+	}
+
+	// Verify Idempotent replay of COD checkout returns identical order without double-deduction
+	reqOrderReplay := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBuffer(codOrderBody))
+	reqOrderReplay.Header.Set("Authorization", "Bearer "+studentToken)
+	reqOrderReplay.Header.Set("Idempotency-Key", idempKey)
+	reqOrderReplay.Header.Set("Content-Type", "application/json")
+	wOrderReplay := httptest.NewRecorder()
+	router.ServeHTTP(wOrderReplay, reqOrderReplay)
+
+	if wOrderReplay.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for idempotent replay, got %d", wOrderReplay.Code)
+	}
+	var replayOrder models.OrderResponse
+	_ = json.Unmarshal(wOrderReplay.Body.Bytes(), &replayOrder)
+	if replayOrder.ID != codOrder.ID {
+		t.Errorf("expected replay order ID %s, got %s", codOrder.ID, replayOrder.ID)
+	}
+
+	// Verify remaining stock in DB is 8 (10 - 2 = 8, no double deduction)
+	var remainingStock int
+	_ = db.Pool.QueryRow(context.Background(), "SELECT quantity FROM inventory WHERE menu_item_id = $1", item.ID).Scan(&remainingStock)
+	if remainingStock != 8 {
+		t.Errorf("expected inventory quantity 8, got %d", remainingStock)
+	}
+
+	// 3. Admin updates status: CONFIRMED -> PREPARING
+	patchBody1, _ := json.Marshal(map[string]string{"status": "PREPARING"})
+	reqPatch1 := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/orders/%s/status", codOrder.ID), bytes.NewBuffer(patchBody1))
+	reqPatch1.Header.Set("Authorization", "Bearer "+adminToken)
+	reqPatch1.Header.Set("Content-Type", "application/json")
+	wPatch1 := httptest.NewRecorder()
+	router.ServeHTTP(wPatch1, reqPatch1)
+	if wPatch1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for status update to PREPARING, got %d: %s", wPatch1.Code, wPatch1.Body.String())
+	}
+
+	// Verify PREPARING notification was saved
+	var prepMsg string
+	_ = db.Pool.QueryRow(context.Background(), "SELECT message FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", student.ID).Scan(&prepMsg)
+	if !strings.Contains(prepMsg, "is preparing your order") {
+		t.Errorf("expected preparing notification message, got '%s'", prepMsg)
+	}
+
+	// 4. Admin updates status: PREPARING -> READY
+	patchBody2, _ := json.Marshal(map[string]string{"status": "READY"})
+	reqPatch2 := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/orders/%s/status", codOrder.ID), bytes.NewBuffer(patchBody2))
+	reqPatch2.Header.Set("Authorization", "Bearer "+adminToken)
+	reqPatch2.Header.Set("Content-Type", "application/json")
+	wPatch2 := httptest.NewRecorder()
+	router.ServeHTTP(wPatch2, reqPatch2)
+	if wPatch2.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for status update to READY, got %d: %s", wPatch2.Code, wPatch2.Body.String())
+	}
+
+	// Verify READY notification was saved
+	var readyMsg string
+	_ = db.Pool.QueryRow(context.Background(), "SELECT message FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", student.ID).Scan(&readyMsg)
+	if !strings.Contains(readyMsg, "is ready for pickup") {
+		t.Errorf("expected ready notification message, got '%s'", readyMsg)
+	}
+
+	// 5. Admin updates status: READY -> COMPLETED
+	patchBody3, _ := json.Marshal(map[string]string{"status": "COMPLETED"})
+	reqPatch3 := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/orders/%s/status", codOrder.ID), bytes.NewBuffer(patchBody3))
+	reqPatch3.Header.Set("Authorization", "Bearer "+adminToken)
+	reqPatch3.Header.Set("Content-Type", "application/json")
+	wPatch3 := httptest.NewRecorder()
+	router.ServeHTTP(wPatch3, reqPatch3)
+	if wPatch3.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for status update to COMPLETED, got %d: %s", wPatch3.Code, wPatch3.Body.String())
+	}
+
+	// Verify COMPLETED notification was saved
+	var compMsg string
+	_ = db.Pool.QueryRow(context.Background(), "SELECT message FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", student.ID).Scan(&compMsg)
+	if !strings.Contains(compMsg, "has been completed") {
+		t.Errorf("expected completed notification message, got '%s'", compMsg)
+	}
+}

@@ -31,7 +31,12 @@ func NewOrderHandler(orderRepo *repository.OrderRepository, hub ...*ws.Hub) *Ord
 	}
 }
 
-// CreateOrder places an order from the user's active cart in PENDING status.
+type createOrderRequest struct {
+	SpecialInstructions string `json:"special_instructions"`
+	PaymentMethod       string `json:"payment_method"`
+}
+
+// CreateOrder places an order from the user's active cart in PENDING (or CONFIRMED for COD) status.
 // It requires an Idempotency-Key header to ensure atomic, safe deduplication of checkouts.
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	userID, ok := middleware.GetUserID(c)
@@ -50,7 +55,12 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
-	order, err := h.orderRepo.CreateFromCart(c.Request.Context(), userID, idempotencyKey, "")
+	var req createOrderRequest
+	if c.Request.Body != nil && c.Request.ContentLength > 0 {
+		_ = c.ShouldBindJSON(&req)
+	}
+
+	order, err := h.orderRepo.CreateFromCart(c.Request.Context(), userID, idempotencyKey, "", req.PaymentMethod)
 	if err != nil {
 		if errors.Is(err, repository.ErrIdempotencyProcessing) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -79,6 +89,9 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	// Notify connected admins in real time about the new order after successful commit
 	if h.hub != nil {
 		h.hub.BroadcastToAdmins(ws.NewOrderCreatedEvent(order.ID, order.UserID, order.TotalAmount))
+		if order.Status == models.OrderStatusConfirmed {
+			h.hub.SendToUser(order.UserID, ws.NewOrderStatusUpdatedEvent(order.ID, models.OrderStatusConfirmed))
+		}
 	}
 
 	c.JSON(http.StatusCreated, order)

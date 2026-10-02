@@ -232,7 +232,7 @@ function getCategoryForItem(item) {
           </div>
           <h1 className="text-3xl font-black text-gray-900 mt-1">Management Hub</h1>
           <p className="text-xs text-gray-500">
-            Control live kitchen queues, menu stock, and AI-driven business intelligence
+            Control live kitchen queues, menu stock, and sales and order insights
           </p>
         </div>
 
@@ -269,7 +269,7 @@ function getCategoryForItem(item) {
             }`}
           >
             <Sparkles className="w-3.5 h-3.5 text-purple-600" />
-            <span>Gemini Analytics</span>
+            <span>Sales Insights</span>
           </button>
           <button
             onClick={() => setActiveTab('trends')}
@@ -280,7 +280,7 @@ function getCategoryForItem(item) {
             }`}
           >
             <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Demand Trends</span>
+            <span>Sales Trends</span>
           </button>
         </div>
       </div>
@@ -687,21 +687,16 @@ function getCategoryForItem(item) {
         </div>
       )}
 
-      {/* 3. GEMINI NATURAL LANGUAGE ANALYTICS TAB */}
+      {/* 3. SALES INSIGHTS TAB */}
       {activeTab === 'analytics' && (
         <div className="space-y-6 animate-in fade-in">
           <div className="bg-gradient-to-r from-purple-900 to-indigo-900 rounded-3xl p-8 text-white space-y-6 shadow-xl">
             <div className="space-y-2">
-              <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-white/10 text-purple-200">
-                <Sparkles className="w-3.5 h-3.5 mr-1 text-purple-300" /> Safe Backend Query Routing
-              </span>
               <h2 className="text-2xl sm:text-3xl font-black">
-                Natural-Language Business Analytics
+                Ask About Sales
               </h2>
               <p className="text-xs text-purple-200 max-w-2xl leading-relaxed">
-                Ask questions about sales, revenue, top dishes, and orders in plain English. Gemini
-                translates questions safely into predefined parameterized backend queries without
-                direct database access.
+                Ask questions about sales, revenue, top selling items, and orders in plain language to get instant summaries.
               </p>
             </div>
 
@@ -723,7 +718,7 @@ function getCategoryForItem(item) {
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <>
-                    <span>Ask AI</span>
+                    <span>Ask</span>
                     <Send className="w-4 h-4" />
                   </>
                 )}
@@ -758,7 +753,7 @@ function getCategoryForItem(item) {
             <div className="p-6 bg-red-50 text-red-700 rounded-3xl border border-red-100 flex items-center space-x-3">
               <AlertCircle className="w-6 h-6 text-red-500 shrink-0" />
               <div>
-                <p className="font-bold text-sm">Analytics Query Notice</p>
+                <p className="font-bold text-sm">Analytics Notice</p>
                 <p className="text-xs">{analyticsError}</p>
               </div>
             </div>
@@ -769,15 +764,15 @@ function getCategoryForItem(item) {
               <div className="flex items-start justify-between border-b border-gray-100 pb-4">
                 <div>
                   <span className="text-[11px] font-bold text-purple-600 uppercase tracking-wider">
-                    Query Operation: {analyticsResult.intent || analyticsResult.operation || 'GENERAL_QUERY'}
-                    {analyticsResult.period ? ` (${analyticsResult.period.replace('_', ' ')})` : ''}
+                    {(analyticsResult.intent || analyticsResult.operation || 'SALES_INSIGHTS').replace(/_/g, ' ')}
+                    {analyticsResult.period ? ` • ${analyticsResult.period.replace(/_/g, ' ')}` : ''}
                   </span>
                   <h3 className="text-xl font-black text-gray-900 mt-1">
                     "{analyticsResult.question || analyticsQuestion}"
                   </h3>
                 </div>
                 <span className="text-xs bg-purple-50 text-purple-700 px-3 py-1 rounded-full font-bold">
-                  Gemini Verified
+                  Verified Insights
                 </span>
               </div>
 
@@ -842,14 +837,14 @@ function getCategoryForItem(item) {
         </div>
       )}
 
-      {/* 4. HISTORICAL DEMAND INSIGHTS TAB (NON-ML) */}
+      {/* 4. SALES TRENDS TAB */}
       {activeTab === 'trends' && (
         <div className="space-y-6 animate-in fade-in">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
-              <h3 className="text-lg font-black text-gray-900">Period-over-Period Demand Insights</h3>
+              <h3 className="text-lg font-black text-gray-900">Sales Trends</h3>
               <p className="text-xs text-gray-500">
-                Lightweight statistical comparison against previous cafeteria operating periods (NON-ML)
+                Compare sales with previous periods
               </p>
             </div>
 
@@ -891,7 +886,7 @@ function getCategoryForItem(item) {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2 text-emerald-800 font-bold uppercase tracking-wider text-[11px]">
                       <Sparkles className="w-4 h-4" />
-                      <span>Demand Analysis Summary</span>
+                      <span>Sales Summary</span>
                     </div>
                     {trendData.summary?.overall_trend && (
                       <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-200/60 text-emerald-900">

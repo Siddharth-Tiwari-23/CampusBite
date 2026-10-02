@@ -16,6 +16,7 @@ import { PaymentModal } from '../components/PaymentModal'
 
 export function CartPage({ onNavigateToMenu, onOrderCreated }) {
   const { cart, isLoading, updateCartItem, deleteCartItem, clearCart, refreshCart } = useCart()
+  const [paymentMethod, setPaymentMethod] = useState('ONLINE')
   const [specialInstructions, setSpecialInstructions] = useState('')
   const [isCheckingOut, setIsCheckingOut] = useState(false)
   const [checkoutError, setCheckoutError] = useState(null)
@@ -40,9 +41,12 @@ export function CartPage({ onNavigateToMenu, onOrderCreated }) {
     setCheckoutError(null)
 
     try {
-      // 1. Transactional order creation with idempotency key
+      // 1. Transactional order creation with idempotency key and payment method
       const orderRes = await orderService.createOrder(
-        { special_instructions: specialInstructions },
+        {
+          special_instructions: specialInstructions,
+          payment_method: paymentMethod,
+        },
         idempotencyKey
       )
 
@@ -51,11 +55,16 @@ export function CartPage({ onNavigateToMenu, onOrderCreated }) {
         throw new Error('Failed to create order from tray')
       }
 
-      // 2. Initiate Razorpay payment for this order
-      const paymentRes = await orderService.initiatePayment(order.id)
-
-      // Open payment modal
-      setActivePayment(paymentRes)
+      if (paymentMethod === 'COD') {
+        // Cash on Delivery flow: immediate order confirmation without Razorpay modal
+        clearCart()
+        setIdempotencyKey('cb_idemp_' + Math.random().toString(36).substring(2) + Date.now().toString(36))
+        onOrderCreated?.(order.id)
+      } else {
+        // Online Payment flow: initiate Razorpay payment for this order
+        const paymentRes = await orderService.initiatePayment(order.id)
+        setActivePayment(paymentRes)
+      }
     } catch (err) {
       // In case of error, refresh cart to ensure sync
       refreshCart()
@@ -242,12 +251,75 @@ export function CartPage({ onNavigateToMenu, onOrderCreated }) {
             </div>
           </div>
 
-          <div className="p-3 bg-amber-50 rounded-2xl border border-amber-100 flex items-start space-x-2 text-amber-800 text-xs">
-            <Clock className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
-            <span>
-              Inventory is held for 15 minutes upon placing the order before payment expiry.
-            </span>
+          {/* Payment Method Selector */}
+          <div className="space-y-2 pt-2 border-t border-gray-100">
+            <label className="block text-xs font-bold uppercase tracking-wider text-gray-600">
+              Payment Method
+            </label>
+            <div className="grid grid-cols-1 gap-2.5">
+              <label
+                className={`p-3 rounded-2xl border flex items-center justify-between cursor-pointer transition-all ${
+                  paymentMethod === 'ONLINE'
+                    ? 'border-orange-500 bg-orange-50/60 ring-2 ring-orange-500/20 text-orange-950 font-bold'
+                    : 'border-gray-200 bg-gray-50/50 hover:bg-gray-50 text-gray-700 font-medium'
+                }`}
+              >
+                <div className="flex items-center space-x-2.5">
+                  <input
+                    type="radio"
+                    name="cart_payment_method"
+                    value="ONLINE"
+                    checked={paymentMethod === 'ONLINE'}
+                    onChange={() => setPaymentMethod('ONLINE')}
+                    className="text-orange-600 focus:ring-orange-500"
+                  />
+                  <span className="text-xs">Online Payment (Razorpay)</span>
+                </div>
+                <span className="text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full font-semibold">
+                  Instant
+                </span>
+              </label>
+
+              <label
+                className={`p-3 rounded-2xl border flex items-center justify-between cursor-pointer transition-all ${
+                  paymentMethod === 'COD'
+                    ? 'border-orange-500 bg-orange-50/60 ring-2 ring-orange-500/20 text-orange-950 font-bold'
+                    : 'border-gray-200 bg-gray-50/50 hover:bg-gray-50 text-gray-700 font-medium'
+                }`}
+              >
+                <div className="flex items-center space-x-2.5">
+                  <input
+                    type="radio"
+                    name="cart_payment_method"
+                    value="COD"
+                    checked={paymentMethod === 'COD'}
+                    onChange={() => setPaymentMethod('COD')}
+                    className="text-orange-600 focus:ring-orange-500"
+                  />
+                  <span className="text-xs">Cash on Delivery (COD)</span>
+                </div>
+                <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full font-semibold">
+                  At Counter
+                </span>
+              </label>
+            </div>
           </div>
+
+          {paymentMethod === 'ONLINE' ? (
+            <div className="p-3 bg-amber-50 rounded-2xl border border-amber-100 flex items-start space-x-2 text-amber-800 text-xs">
+              <Clock className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+              <span>
+                Inventory is held for 15 minutes upon placing the order before payment expiry.
+              </span>
+            </div>
+          ) : (
+            <div className="p-3 bg-blue-50 rounded-2xl border border-blue-100 flex items-start space-x-2 text-blue-800 text-xs">
+              <Clock className="w-4 h-4 shrink-0 mt-0.5 text-blue-600" />
+              <span>
+                Order is confirmed immediately. Pay cash when collecting at the counter.
+              </span>
+            </div>
+          )}
 
           <button
             onClick={handleCheckout}
@@ -257,11 +329,11 @@ export function CartPage({ onNavigateToMenu, onOrderCreated }) {
             {isCheckingOut ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
-                <span>Reserving Inventory...</span>
+                <span>{paymentMethod === 'COD' ? 'Placing COD Order...' : 'Reserving Inventory...'}</span>
               </>
             ) : (
               <>
-                <span>Proceed to Pay</span>
+                <span>{paymentMethod === 'COD' ? 'Place COD Order' : 'Proceed to Pay'}</span>
                 <ArrowRight className="w-4 h-4" />
               </>
             )}

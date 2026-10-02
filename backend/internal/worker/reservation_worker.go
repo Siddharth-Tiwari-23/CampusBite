@@ -157,6 +157,12 @@ func (w *ReservationWorker) ExpireSingleReservation(ctx context.Context, reserva
 	var currentQty int
 	err = tx.QueryRow(ctx, lockInvQuery, res.MenuItemID).Scan(&currentQty)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// If the inventory record was deleted, mark reservation expired so it doesn't block future queue runs
+			_, _ = tx.Exec(ctx, "UPDATE inventory_reservations SET status = $1 WHERE id = $2", models.ReservationStatusExpired, res.ID)
+			_ = tx.Commit(ctx)
+			return true, nil
+		}
 		return false, fmt.Errorf("failed to lock inventory row for menu item %s: %w", res.MenuItemID, err)
 	}
 

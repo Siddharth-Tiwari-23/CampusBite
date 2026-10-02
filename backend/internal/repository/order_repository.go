@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"campusbite/internal/database"
@@ -43,14 +44,25 @@ func NewOrderRepository(db *database.DB) *OrderRepository {
 
 // CreateFromCart executes an idempotent, transactional checkout with concurrency-safe inventory reservation.
 // It inserts an idempotency record inside the transaction to ensure atomic deduplication.
+// If paymentMethod is "COD" or "CASH_ON_DELIVERY", the order is placed directly in CONFIRMED status with CONSUMED reservations,
+// creates a pending cash payment record, and persists an order confirmation notification.
 // If a repeated request with the same (user_id, idempotencyKey) is detected:
 //   - If COMPLETED: returns the previously created order payload without re-running checkout or re-reserving stock.
 //   - If PROCESSING: returns ErrIdempotencyProcessing to prevent concurrent duplicate execution.
 //   - If FAILED: returns ErrIdempotencyFailed.
-func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, idempotencyKey string, requestHash string) (*models.OrderResponse, error) {
+func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, idempotencyKey string, requestHash string, paymentMethodOption ...string) (*models.OrderResponse, error) {
 	if idempotencyKey == "" {
 		return nil, errors.New("idempotency key is required")
 	}
+
+	paymentMethod := "ONLINE"
+	if len(paymentMethodOption) > 0 && strings.TrimSpace(paymentMethodOption[0]) != "" {
+		m := strings.ToUpper(strings.TrimSpace(paymentMethodOption[0]))
+		if m == "COD" || m == "CASH_ON_DELIVERY" {
+			paymentMethod = "COD"
+		}
+	}
+	isCOD := paymentMethod == "COD"
 
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
@@ -195,7 +207,15 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, ide
 
 	totalAmount = math.Round(totalAmount*100) / 100
 
-	// 4. Insert order record in PENDING status
+	// 4. Determine initial order status
+	initialOrderStatus := models.OrderStatusPending
+	reservationStatus := models.ReservationStatusActive
+	if isCOD {
+		initialOrderStatus = models.OrderStatusConfirmed
+		reservationStatus = models.ReservationStatusConsumed
+	}
+
+	// Insert order record
 	insertOrderQuery := `
 		INSERT INTO orders (user_id, status, total_amount, created_at, updated_at)
 		VALUES ($1, $2, $3, NOW(), NOW())
@@ -203,10 +223,10 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, ide
 	`
 	var order models.OrderResponse
 	order.UserID = userID
-	order.Status = models.OrderStatusPending
+	order.Status = initialOrderStatus
 	order.TotalAmount = totalAmount
 
-	err = tx.QueryRow(ctx, insertOrderQuery, userID, models.OrderStatusPending, totalAmount).
+	err = tx.QueryRow(ctx, insertOrderQuery, userID, initialOrderStatus, totalAmount).
 		Scan(&order.ID, &order.CreatedAt, &order.UpdatedAt)
 	if err != nil {
 		_ = tx.Rollback(ctx)
@@ -240,10 +260,10 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, ide
 		res.OrderID = order.ID
 		res.MenuItemID = item.menuItemID
 		res.Quantity = item.quantity
-		res.Status = models.ReservationStatusActive
+		res.Status = reservationStatus
 		res.ExpiresAt = expiresAt
 
-		err := tx.QueryRow(ctx, insertReservationQuery, order.ID, item.menuItemID, item.quantity, models.ReservationStatusActive, expiresAt).
+		err := tx.QueryRow(ctx, insertReservationQuery, order.ID, item.menuItemID, item.quantity, reservationStatus, expiresAt).
 			Scan(&res.ID, &res.CreatedAt)
 		if err != nil {
 			_ = tx.Rollback(ctx)
@@ -253,7 +273,42 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, ide
 		reservationsResp = append(reservationsResp, res)
 	}
 
-	// 7. Clear user's cart items
+	// 7. For COD: Insert payment record and confirmation notification
+	if isCOD {
+		insertPaymentQuery := `
+			INSERT INTO payments (order_id, provider_order_id, amount, status, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, NOW(), NOW())
+		`
+		_, err = tx.Exec(ctx, insertPaymentQuery, order.ID, "COD", totalAmount, models.PaymentStatusPending)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
+			return nil, fmt.Errorf("failed to insert COD payment record: %w", err)
+		}
+
+		// Persist durable order confirmation notification
+		shortID := order.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		dataBytes, _ := json.Marshal(map[string]interface{}{
+			"order_id":       order.ID,
+			"status":         models.OrderStatusConfirmed,
+			"payment_method": "COD",
+		})
+		insertNotifQuery := `
+			INSERT INTO notifications (user_id, type, title, message, data, is_read, created_at)
+			VALUES ($1, $2, $3, $4, $5, false, NOW())
+		`
+		_, err = tx.Exec(ctx, insertNotifQuery, userID, models.NotificationTypeOrderStatus, "Order Confirmed", fmt.Sprintf("Your order #%s has been confirmed.", shortID), dataBytes)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
+			return nil, fmt.Errorf("failed to persist COD notification: %w", err)
+		}
+	}
+
+	// 8. Clear user's cart items
 	clearCartQuery := `
 		DELETE FROM cart_items ci
 		USING carts c
