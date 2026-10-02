@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { ShieldCheck, Loader2, AlertCircle, X } from 'lucide-react'
+import { ShieldCheck, Loader2, AlertCircle, X, CreditCard } from 'lucide-react'
 import { paymentService } from '../services/paymentService'
 
 export function PaymentModal({
@@ -13,26 +13,65 @@ export function PaymentModal({
 
   if (!isOpen || !paymentDetails) return null
 
-  const handleSimulatePayment = async () => {
-    setIsProcessing(true)
+  const handleOpenRazorpay = () => {
     setError(null)
 
-    try {
-      // In Razorpay Test/Sandbox mode, we generate a mock payment ID and signature
-      const mockPaymentId = `pay_test_${Date.now()}`
-      const mockSignature = `sig_test_${Date.now()}`
+    if (typeof window.Razorpay === 'undefined') {
+      setError('Razorpay Checkout SDK is still loading or unavailable. Please check your internet connection and try again.')
+      return
+    }
 
-      await paymentService.verifyPayment({
-        razorpay_order_id: paymentDetails.razorpay_order_id,
-        razorpay_payment_id: mockPaymentId,
-        razorpay_signature: mockSignature,
+    try {
+      const options = {
+        key: paymentDetails.key_id,
+        amount: paymentDetails.amount,
+        currency: paymentDetails.currency || 'INR',
+        name: 'CampusBite',
+        description: 'Campus cafeteria order',
+        order_id: paymentDetails.razorpay_order_id,
+        handler: async function (response) {
+          setIsProcessing(true)
+          setError(null)
+
+          try {
+            await paymentService.verifyPayment({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            })
+
+            setIsProcessing(false)
+            onSuccess(paymentDetails.order_id)
+          } catch (err) {
+            setIsProcessing(false)
+            setError(err instanceof Error ? err.message : 'Payment verification failed')
+          }
+        },
+        modal: {
+          ondismiss: function () {
+            setIsProcessing(false)
+          },
+        },
+        theme: {
+          color: '#ea580c',
+        },
+      }
+
+      const rzp = new window.Razorpay(options)
+
+      rzp.on('payment.failed', function (response) {
+        setIsProcessing(false)
+        const errorDesc =
+          response.error?.description ||
+          response.error?.reason ||
+          'Payment failed or was declined by your bank/provider.'
+        setError(errorDesc)
       })
 
-      setIsProcessing(false)
-      onSuccess(paymentDetails.order_id)
+      rzp.open()
     } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to launch checkout')
       setIsProcessing(false)
-      setError(err instanceof Error ? err.message : 'Payment verification failed')
     }
   }
 
@@ -86,21 +125,24 @@ export function PaymentModal({
 
           <div className="space-y-3">
             <p className="text-xs text-gray-500 text-center">
-              Click below to complete and authorize payment for this order.
+              Click below to proceed to Razorpay secure checkout.
             </p>
 
             <button
-              onClick={handleSimulatePayment}
+              onClick={handleOpenRazorpay}
               disabled={isProcessing}
               className="w-full py-3.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-200 transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
             >
               {isProcessing ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Authorizing Payment...</span>
+                  <span>Verifying Transaction...</span>
                 </>
               ) : (
-                <span>Pay ₹{formattedAmount}</span>
+                <>
+                  <CreditCard className="w-4 h-4" />
+                  <span>Pay ₹{formattedAmount}</span>
+                </>
               )}
             </button>
 
