@@ -2,22 +2,36 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"campusbite/internal/database"
 	"campusbite/internal/models"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
-	ErrOrderNotFound = errors.New("order not found")
-	ErrEmptyCart     = errors.New("cannot create order from an empty cart")
+	ErrOrderNotFound         = errors.New("order not found")
+	ErrEmptyCart             = errors.New("cannot create order from an empty cart")
+	ErrInsufficientInventory = errors.New("insufficient inventory")
+	ErrMenuItemUnavailable   = errors.New("menu item is unavailable")
+	ErrIdempotencyProcessing = errors.New("a checkout operation with this idempotency key is currently being processed")
+	ErrIdempotencyFailed     = errors.New("previous checkout operation with this idempotency key failed")
 )
 
-// OrderRepository handles database operations for orders and order items.
+const (
+	// ReservationTTL defines the duration an inventory reservation remains ACTIVE before expiry.
+	ReservationTTL = 15 * time.Minute
+	// IdempotencyTTL defines the retention duration for idempotency records.
+	IdempotencyTTL = 24 * time.Hour
+)
+
+// OrderRepository handles database operations for orders, order items, inventory reservations, and idempotency.
 type OrderRepository struct {
 	db *database.DB
 }
@@ -27,15 +41,40 @@ func NewOrderRepository(db *database.DB) *OrderRepository {
 	return &OrderRepository{db: db}
 }
 
-// CreateFromCart creates an order in PENDING status from the user's active cart in a single transaction.
-func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string) (*models.OrderResponse, error) {
+// CreateFromCart executes an idempotent, transactional checkout with concurrency-safe inventory reservation.
+// It inserts an idempotency record inside the transaction to ensure atomic deduplication.
+// If a repeated request with the same (user_id, idempotencyKey) is detected:
+//   - If COMPLETED: returns the previously created order payload without re-running checkout or re-reserving stock.
+//   - If PROCESSING: returns ErrIdempotencyProcessing to prevent concurrent duplicate execution.
+//   - If FAILED: returns ErrIdempotencyFailed.
+func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, idempotencyKey string, requestHash string) (*models.OrderResponse, error) {
+	if idempotencyKey == "" {
+		return nil, errors.New("idempotency key is required")
+	}
+
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. Fetch current cart items with catalog price and availability
+	// 1. Attempt to claim the idempotency key for this user atomically within the transaction
+	insertIdempotencyQuery := `
+		INSERT INTO idempotency_keys (user_id, key, request_hash, status, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, NOW() + $5::interval, NOW())
+	`
+	_, err = tx.Exec(ctx, insertIdempotencyQuery, userID, idempotencyKey, requestHash, models.IdempotencyStatusProcessing, "24 hours")
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// Duplicate idempotency key detected. Roll back our transaction and fetch the existing record.
+			_ = tx.Rollback(ctx)
+			return r.handleExistingIdempotencyKey(ctx, userID, idempotencyKey)
+		}
+		return nil, fmt.Errorf("failed to insert idempotency key: %w", err)
+	}
+
+	// 2. Fetch current cart items ordered deterministically by menu_item_id to prevent database deadlocks
 	cartQuery := `
 		SELECT 
 			ci.menu_item_id,
@@ -47,11 +86,13 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string) (*m
 		JOIN menu_items m ON ci.menu_item_id = m.id
 		JOIN carts c ON ci.cart_id = c.id
 		WHERE c.user_id = $1
-		ORDER BY m.name ASC
+		ORDER BY ci.menu_item_id ASC
 	`
 
 	rows, err := tx.Query(ctx, cartQuery, userID)
 	if err != nil {
+		_ = tx.Rollback(ctx)
+		r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
 		return nil, fmt.Errorf("failed to query cart items: %w", err)
 	}
 
@@ -68,6 +109,8 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string) (*m
 		var item cartRow
 		if err := rows.Scan(&item.menuItemID, &item.name, &item.price, &item.isAvailable, &item.quantity); err != nil {
 			rows.Close()
+			_ = tx.Rollback(ctx)
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
 			return nil, fmt.Errorf("failed to scan cart row: %w", err)
 		}
 		itemsToOrder = append(itemsToOrder, item)
@@ -75,17 +118,69 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string) (*m
 	rows.Close()
 
 	if len(itemsToOrder) == 0 {
+		_ = tx.Rollback(ctx)
+		r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, "cart is empty")
 		return nil, ErrEmptyCart
 	}
 
-	// 2. Validate availability and compute total
+	// 3. Validate menu item availability & Lock inventory rows with SELECT ... FOR UPDATE
 	var totalAmount float64
 	orderItemsResp := make([]models.OrderItemResponse, 0, len(itemsToOrder))
+	reservationsResp := make([]models.InventoryReservation, 0, len(itemsToOrder))
+
+	lockInventoryQuery := `
+		SELECT quantity
+		FROM inventory
+		WHERE menu_item_id = $1
+		FOR UPDATE
+	`
+
+	deductInventoryQuery := `
+		UPDATE inventory
+		SET quantity = quantity - $2,
+		    updated_at = NOW()
+		WHERE menu_item_id = $1
+	`
 
 	for _, item := range itemsToOrder {
 		if !item.isAvailable {
-			return nil, fmt.Errorf("item '%s' is no longer available", item.name)
+			_ = tx.Rollback(ctx)
+			failErr := fmt.Errorf("item '%s' is no longer available: %w", item.name, ErrMenuItemUnavailable)
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, failErr.Error())
+			return nil, failErr
 		}
+
+		// Lock inventory row for this menu item
+		var currentStock int
+		err := tx.QueryRow(ctx, lockInventoryQuery, item.menuItemID).Scan(&currentStock)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			if errors.Is(err, pgx.ErrNoRows) {
+				failErr := fmt.Errorf("inventory record not found for '%s': %w", item.name, ErrInsufficientInventory)
+				r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, failErr.Error())
+				return nil, failErr
+			}
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
+			return nil, fmt.Errorf("failed to lock inventory for '%s': %w", item.name, err)
+		}
+
+		// Verify stock sufficiency
+		if currentStock < item.quantity {
+			_ = tx.Rollback(ctx)
+			failErr := fmt.Errorf("insufficient stock for '%s': requested %d, available %d: %w",
+				item.name, item.quantity, currentStock, ErrInsufficientInventory)
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, failErr.Error())
+			return nil, failErr
+		}
+
+		// Deduct available inventory
+		_, err = tx.Exec(ctx, deductInventoryQuery, item.menuItemID, item.quantity)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
+			return nil, fmt.Errorf("failed to deduct inventory for '%s': %w", item.name, err)
+		}
+
 		subtotal := math.Round(float64(item.quantity)*item.price*100) / 100
 		totalAmount += subtotal
 
@@ -100,7 +195,7 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string) (*m
 
 	totalAmount = math.Round(totalAmount*100) / 100
 
-	// 3. Insert order record
+	// 4. Insert order record in PENDING status
 	insertOrderQuery := `
 		INSERT INTO orders (user_id, status, total_amount, created_at, updated_at)
 		VALUES ($1, $2, $3, NOW(), NOW())
@@ -114,10 +209,12 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string) (*m
 	err = tx.QueryRow(ctx, insertOrderQuery, userID, models.OrderStatusPending, totalAmount).
 		Scan(&order.ID, &order.CreatedAt, &order.UpdatedAt)
 	if err != nil {
+		_ = tx.Rollback(ctx)
+		r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
 		return nil, fmt.Errorf("failed to insert order: %w", err)
 	}
 
-	// 4. Insert order items with snapshot unit price
+	// 5. Insert order items with frozen price snapshot
 	insertItemQuery := `
 		INSERT INTO order_items (order_id, menu_item_id, quantity, unit_price)
 		VALUES ($1, $2, $3, $4)
@@ -125,11 +222,38 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string) (*m
 	for _, item := range itemsToOrder {
 		_, err := tx.Exec(ctx, insertItemQuery, order.ID, item.menuItemID, item.quantity, item.price)
 		if err != nil {
+			_ = tx.Rollback(ctx)
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
 			return nil, fmt.Errorf("failed to insert order item: %w", err)
 		}
 	}
 
-	// 5. Clear cart items
+	// 6. Create inventory reservation records
+	insertReservationQuery := `
+		INSERT INTO inventory_reservations (order_id, menu_item_id, quantity, status, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		RETURNING id, created_at
+	`
+	expiresAt := time.Now().Add(ReservationTTL)
+	for _, item := range itemsToOrder {
+		var res models.InventoryReservation
+		res.OrderID = order.ID
+		res.MenuItemID = item.menuItemID
+		res.Quantity = item.quantity
+		res.Status = models.ReservationStatusActive
+		res.ExpiresAt = expiresAt
+
+		err := tx.QueryRow(ctx, insertReservationQuery, order.ID, item.menuItemID, item.quantity, models.ReservationStatusActive, expiresAt).
+			Scan(&res.ID, &res.CreatedAt)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
+			return nil, fmt.Errorf("failed to insert inventory reservation: %w", err)
+		}
+		reservationsResp = append(reservationsResp, res)
+	}
+
+	// 7. Clear user's cart items
 	clearCartQuery := `
 		DELETE FROM cart_items ci
 		USING carts c
@@ -137,15 +261,98 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string) (*m
 	`
 	_, err = tx.Exec(ctx, clearCartQuery, userID)
 	if err != nil {
+		_ = tx.Rollback(ctx)
+		r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
 		return nil, fmt.Errorf("failed to clear cart items: %w", err)
 	}
 
+	order.Items = orderItemsResp
+	order.Reservations = reservationsResp
+
+	// 8. Update idempotency record to COMPLETED with serialized response payload
+	orderJSON, err := json.Marshal(order)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
+		return nil, fmt.Errorf("failed to serialize order response: %w", err)
+	}
+	orderBodyStr := string(orderJSON)
+	responseStatus := 201
+
+	updateIdempotencyQuery := `
+		UPDATE idempotency_keys
+		SET status = $3,
+		    response_status = $4,
+		    response_body = $5
+		WHERE user_id = $1 AND key = $2
+	`
+	_, err = tx.Exec(ctx, updateIdempotencyQuery, userID, idempotencyKey, models.IdempotencyStatusCompleted, responseStatus, orderBodyStr)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, fmt.Errorf("failed to update idempotency key status: %w", err)
+	}
+
+	// 9. Commit the entire transaction atomically
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit order transaction: %w", err)
 	}
 
-	order.Items = orderItemsResp
 	return &order, nil
+}
+
+// handleExistingIdempotencyKey inspects an already registered idempotency key and returns the saved result if COMPLETED.
+func (r *OrderRepository) handleExistingIdempotencyKey(ctx context.Context, userID, idempotencyKey string) (*models.OrderResponse, error) {
+	query := `
+		SELECT status, response_status, response_body
+		FROM idempotency_keys
+		WHERE user_id = $1 AND key = $2
+	`
+	var status string
+	var responseStatus *int
+	var responseBody *string
+
+	err := r.db.Pool.QueryRow(ctx, query, userID, idempotencyKey).Scan(&status, &responseStatus, &responseBody)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("idempotency record not found")
+		}
+		return nil, fmt.Errorf("failed to retrieve idempotency record: %w", err)
+	}
+
+	switch status {
+	case models.IdempotencyStatusCompleted:
+		if responseBody == nil || *responseBody == "" {
+			return nil, errors.New("completed idempotency record has empty response body")
+		}
+		var order models.OrderResponse
+		if err := json.Unmarshal([]byte(*responseBody), &order); err != nil {
+			return nil, fmt.Errorf("failed to deserialize cached order response: %w", err)
+		}
+		return &order, nil
+
+	case models.IdempotencyStatusProcessing:
+		return nil, ErrIdempotencyProcessing
+
+	case models.IdempotencyStatusFailed:
+		if responseBody != nil && *responseBody != "" {
+			return nil, fmt.Errorf("%w: %s", ErrIdempotencyFailed, *responseBody)
+		}
+		return nil, ErrIdempotencyFailed
+
+	default:
+		return nil, fmt.Errorf("unknown idempotency status: %s", status)
+	}
+}
+
+// recordIdempotencyFailure persists a FAILED idempotency state in a standalone statement.
+func (r *OrderRepository) recordIdempotencyFailure(ctx context.Context, userID, idempotencyKey, requestHash, reason string) {
+	query := `
+		INSERT INTO idempotency_keys (user_id, key, request_hash, status, response_status, response_body, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, 400, $5, NOW() + INTERVAL '24 hours', NOW())
+		ON CONFLICT (user_id, key) DO UPDATE
+		SET status = $4, response_status = 400, response_body = $5
+	`
+	_, _ = r.db.Pool.Exec(ctx, query, userID, idempotencyKey, requestHash, models.IdempotencyStatusFailed, reason)
 }
 
 // GetByID retrieves a single order and its items by order ID.
@@ -178,7 +385,48 @@ func (r *OrderRepository) GetByID(ctx context.Context, orderID string) (*models.
 	}
 	order.Items = items
 
+	reservations, err := r.GetReservationsByOrderID(ctx, order.ID)
+	if err != nil {
+		return nil, err
+	}
+	order.Reservations = reservations
+
 	return &order, nil
+}
+
+// GetReservationsByOrderID retrieves all inventory reservations associated with an order.
+func (r *OrderRepository) GetReservationsByOrderID(ctx context.Context, orderID string) ([]models.InventoryReservation, error) {
+	query := `
+		SELECT id, order_id, menu_item_id, quantity, status, expires_at, created_at
+		FROM inventory_reservations
+		WHERE order_id = $1
+		ORDER BY created_at ASC
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, orderID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query inventory reservations: %w", err)
+	}
+	defer rows.Close()
+
+	reservations := make([]models.InventoryReservation, 0)
+	for rows.Next() {
+		var res models.InventoryReservation
+		if err := rows.Scan(
+			&res.ID,
+			&res.OrderID,
+			&res.MenuItemID,
+			&res.Quantity,
+			&res.Status,
+			&res.ExpiresAt,
+			&res.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan inventory reservation: %w", err)
+		}
+		reservations = append(reservations, res)
+	}
+
+	return reservations, rows.Err()
 }
 
 // ListByUserID retrieves all orders placed by a specific user.
@@ -231,13 +479,19 @@ func (r *OrderRepository) queryOrders(ctx context.Context, query string, args ..
 		return nil, fmt.Errorf("error iterating orders: %w", err)
 	}
 
-	// Populate items for each order
+	// Populate items and reservations for each order
 	for i := range orders {
 		items, err := r.getOrderItems(ctx, orders[i].ID)
 		if err != nil {
 			return nil, err
 		}
 		orders[i].Items = items
+
+		reservations, err := r.GetReservationsByOrderID(ctx, orders[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		orders[i].Reservations = reservations
 	}
 
 	return orders, nil
@@ -283,4 +537,95 @@ func (r *OrderRepository) getOrderItems(ctx context.Context, orderID string) ([]
 	}
 
 	return items, nil
+}
+
+// UpdateStatus transitions an order to a new status and persists a notification within the same transaction.
+func (r *OrderRepository) UpdateStatus(ctx context.Context, orderID string, newStatus string) (*models.OrderResponse, error) {
+	switch newStatus {
+	case models.OrderStatusPending,
+		models.OrderStatusConfirmed,
+		models.OrderStatusPreparing,
+		models.OrderStatusReady,
+		models.OrderStatusCompleted,
+		models.OrderStatusCancelled:
+	default:
+		return nil, fmt.Errorf("invalid order status: %s", newStatus)
+	}
+
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var userID string
+	var currentStatus string
+	checkQuery := `
+		SELECT user_id, status
+		FROM orders
+		WHERE id = $1
+		FOR UPDATE
+	`
+	err = tx.QueryRow(ctx, checkQuery, orderID).Scan(&userID, &currentStatus)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrOrderNotFound
+		}
+		return nil, fmt.Errorf("failed to check order: %w", err)
+	}
+
+	updateQuery := `
+		UPDATE orders
+		SET status = $1,
+		    updated_at = NOW()
+		WHERE id = $2
+	`
+	_, err = tx.Exec(ctx, updateQuery, newStatus, orderID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update order status: %w", err)
+	}
+
+	// Persist notification within the same transaction
+	title, message := getOrderStatusNotificationContent(orderID, newStatus)
+	dataMap := map[string]interface{}{
+		"order_id": orderID,
+		"status":   newStatus,
+	}
+	dataBytes, _ := json.Marshal(dataMap)
+
+	insertNotifQuery := `
+		INSERT INTO notifications (user_id, type, title, message, data, is_read, created_at)
+		VALUES ($1, $2, $3, $4, $5, false, NOW())
+	`
+	_, err = tx.Exec(ctx, insertNotifQuery, userID, models.NotificationTypeOrderStatus, title, message, dataBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create notification: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit order update transaction: %w", err)
+	}
+
+	return r.GetByID(ctx, orderID)
+}
+
+func getOrderStatusNotificationContent(orderID, status string) (string, string) {
+	shortID := orderID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	switch status {
+	case models.OrderStatusConfirmed:
+		return "Order Confirmed", fmt.Sprintf("Your order #%s has been confirmed.", shortID)
+	case models.OrderStatusPreparing:
+		return "Order Preparing", fmt.Sprintf("The kitchen is preparing your order #%s.", shortID)
+	case models.OrderStatusReady:
+		return "Order Ready", fmt.Sprintf("Your order #%s is ready for pickup!", shortID)
+	case models.OrderStatusCompleted:
+		return "Order Completed", fmt.Sprintf("Your order #%s has been completed. Enjoy!", shortID)
+	case models.OrderStatusCancelled:
+		return "Order Cancelled", fmt.Sprintf("Your order #%s was cancelled.", shortID)
+	default:
+		return "Order Updated", fmt.Sprintf("Your order #%s status changed to %s.", shortID, status)
+	}
 }

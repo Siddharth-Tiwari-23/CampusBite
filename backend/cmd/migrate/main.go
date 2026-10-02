@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -221,23 +223,47 @@ func runStatus(ctx context.Context, db *database.DB, migrationsDir string) error
 	return nil
 }
 
+func printSanitizedTarget(rawURL string) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		fmt.Printf("Target Database: %s\n", rawURL)
+		return
+	}
+	user := parsed.User.Username()
+	host := parsed.Host
+	dbPath := strings.TrimPrefix(parsed.Path, "/")
+	fmt.Printf("Target Database: host=%s, db=%s, user=%s\n", host, dbPath, user)
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run ./cmd/migrate [up|down|status]")
+	var dbURLFlag string
+	flag.StringVar(&dbURLFlag, "database-url", "", "Override database URL connection string")
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) < 1 {
+		fmt.Println("Usage: go run ./cmd/migrate [-database-url=URL] [up|down|status]")
 		os.Exit(1)
 	}
 
-	command := os.Args[1]
+	command := args[0]
 
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Configuration error: %v", err)
 	}
 
+	targetURL := cfg.DatabaseURL
+	if dbURLFlag != "" {
+		targetURL = dbURLFlag
+	}
+
+	printSanitizedTarget(targetURL)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	db, err := database.NewPool(ctx, cfg.DatabaseURL)
+	db, err := database.NewPool(ctx, targetURL)
 	if err != nil {
 		log.Fatalf("Database connection error: %v", err)
 	}
@@ -266,7 +292,7 @@ func main() {
 			log.Fatalf("Migration status failed: %v", err)
 		}
 	default:
-		fmt.Printf("Unknown command '%s'. Usage: go run ./cmd/migrate [up|down|status]\n", command)
+		fmt.Printf("Unknown command '%s'. Usage: go run ./cmd/migrate [-database-url=URL] [up|down|status]\n", command)
 		os.Exit(1)
 	}
 }

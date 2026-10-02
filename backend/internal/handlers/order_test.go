@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,17 +16,55 @@ import (
 	"campusbite/internal/repository"
 )
 
-func TestOrder_CreateAndGet(t *testing.T) {
+func TestOrder_IdempotencyValidation(t *testing.T) {
 	router, db, tokenService := setupIntegrationApp(t)
 	defer db.Close()
 
 	_, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	// 1. Missing Idempotency-Key header -> 400 Bad Request
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req1.Header.Set("Authorization", "Bearer "+studentToken)
+	w1 := httptest.NewRecorder()
+	router.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for missing Idempotency-Key, got %d: %s", w1.Code, w1.Body.String())
+	}
+
+	// 2. Empty / whitespace Idempotency-Key header -> 400 Bad Request
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req2.Header.Set("Authorization", "Bearer "+studentToken)
+	req2.Header.Set("Idempotency-Key", "   ")
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for empty Idempotency-Key, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	// 3. Oversized Idempotency-Key header (>255 chars) -> 400 Bad Request
+	oversizedKey := strings.Repeat("A", 256)
+	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req3.Header.Set("Authorization", "Bearer "+studentToken)
+	req3.Header.Set("Idempotency-Key", oversizedKey)
+	w3 := httptest.NewRecorder()
+	router.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for oversized Idempotency-Key, got %d: %s", w3.Code, w3.Body.String())
+	}
+}
+
+func TestOrder_CreateAndGet(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	user1, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
 	_, adminToken := createRealTestUser(t, db, tokenService, models.RoleAdmin)
 	_, otherStudentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
 
 	// 1. Attempt to create order from empty cart -> 400 Bad Request
 	emptyOrderReq := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
 	emptyOrderReq.Header.Set("Authorization", "Bearer "+studentToken)
+	emptyOrderReq.Header.Set("Idempotency-Key", fmt.Sprintf("empty_cart_%d", time.Now().UnixNano()))
 	emptyOrderW := httptest.NewRecorder()
 	router.ServeHTTP(emptyOrderW, emptyOrderReq)
 
@@ -34,11 +74,13 @@ func TestOrder_CreateAndGet(t *testing.T) {
 
 	// 2. Seed menu items and populate cart
 	menuRepo := repository.NewMenuRepository(db)
-	item1, err := menuRepo.Create(context.Background(), fmt.Sprintf("OrderPizza_%d", time.Now().UnixNano()), "Fresh Pizza", 150.0, true, 20)
+	invRepo := repository.NewInventoryRepository(db)
+
+	item1, err := menuRepo.Create(context.Background(), fmt.Sprintf("OrderPizza_%d", time.Now().UnixNano()), "Fresh Pizza", 150.0, "", true, 20)
 	if err != nil {
 		t.Fatalf("failed to seed menu item 1: %v", err)
 	}
-	item2, err := menuRepo.Create(context.Background(), fmt.Sprintf("OrderCoke_%d", time.Now().UnixNano()), "Cold Drink", 40.0, true, 50)
+	item2, err := menuRepo.Create(context.Background(), fmt.Sprintf("OrderCoke_%d", time.Now().UnixNano()), "Cold Drink", 40.0, "", true, 50)
 	if err != nil {
 		t.Fatalf("failed to seed menu item 2: %v", err)
 	}
@@ -65,9 +107,11 @@ func TestOrder_CreateAndGet(t *testing.T) {
 		t.Fatalf("failed to add item 2 to cart: %s", addW2.Body.String())
 	}
 
-	// 3. Create order -> 201 Created
+	// 3. Create order (Transactional checkout with inventory reservation) -> 201 Created
+	idempotencyKey := fmt.Sprintf("checkout_key_%d", time.Now().UnixNano())
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
 	createReq.Header.Set("Authorization", "Bearer "+studentToken)
+	createReq.Header.Set("Idempotency-Key", idempotencyKey)
 	createW := httptest.NewRecorder()
 	router.ServeHTTP(createW, createReq)
 
@@ -90,8 +134,29 @@ func TestOrder_CreateAndGet(t *testing.T) {
 	if len(createdOrder.Items) != 2 {
 		t.Fatalf("expected 2 items in order, got %d", len(createdOrder.Items))
 	}
+	if len(createdOrder.Reservations) != 2 {
+		t.Fatalf("expected 2 reservation records, got %d", len(createdOrder.Reservations))
+	}
+	for _, res := range createdOrder.Reservations {
+		if res.Status != models.ReservationStatusActive {
+			t.Errorf("expected reservation status ACTIVE, got %s", res.Status)
+		}
+		if res.OrderID != createdOrder.ID {
+			t.Errorf("expected reservation order_id %s, got %s", createdOrder.ID, res.OrderID)
+		}
+	}
 
-	// 4. Verify cart was cleared after order placement
+	// 4. Verify inventory was decremented correctly
+	inv1, err := invRepo.GetByMenuItemID(context.Background(), item1.ID)
+	if err != nil || inv1.Quantity != 18 { // 20 - 2 = 18
+		t.Errorf("expected item 1 inventory 18, got %d (err: %v)", inv1.Quantity, err)
+	}
+	inv2, err := invRepo.GetByMenuItemID(context.Background(), item2.ID)
+	if err != nil || inv2.Quantity != 47 { // 50 - 3 = 47
+		t.Errorf("expected item 2 inventory 47, got %d (err: %v)", inv2.Quantity, err)
+	}
+
+	// 5. Verify cart was cleared after successful order placement
 	getCartReq := httptest.NewRequest(http.MethodGet, "/api/v1/cart", nil)
 	getCartReq.Header.Set("Authorization", "Bearer "+studentToken)
 	getCartW := httptest.NewRecorder()
@@ -103,7 +168,7 @@ func TestOrder_CreateAndGet(t *testing.T) {
 		t.Errorf("expected 0 items in cart after order creation, got %d", len(cartAfterOrder.Items))
 	}
 
-	// 5. Get order by ID - Owner Student -> 200 OK
+	// 6. Get order by ID - Owner Student -> 200 OK
 	getOrderReq := httptest.NewRequest(http.MethodGet, "/api/v1/orders/"+createdOrder.ID, nil)
 	getOrderReq.Header.Set("Authorization", "Bearer "+studentToken)
 	getOrderW := httptest.NewRecorder()
@@ -118,8 +183,11 @@ func TestOrder_CreateAndGet(t *testing.T) {
 	if fetchedOrder.ID != createdOrder.ID {
 		t.Errorf("expected order ID %s, got %s", createdOrder.ID, fetchedOrder.ID)
 	}
+	if fetchedOrder.UserID != user1.ID {
+		t.Errorf("expected user ID %s, got %s", user1.ID, fetchedOrder.UserID)
+	}
 
-	// 6. Get order by ID - Other Student -> 403 Forbidden
+	// 7. Get order by ID - Other Student -> 403 Forbidden
 	forbiddenReq := httptest.NewRequest(http.MethodGet, "/api/v1/orders/"+createdOrder.ID, nil)
 	forbiddenReq.Header.Set("Authorization", "Bearer "+otherStudentToken)
 	forbiddenW := httptest.NewRecorder()
@@ -129,7 +197,7 @@ func TestOrder_CreateAndGet(t *testing.T) {
 		t.Errorf("expected 403 Forbidden for non-owner student, got %d", forbiddenW.Code)
 	}
 
-	// 7. Get order by ID - Admin -> 200 OK
+	// 8. Get order by ID - Admin -> 200 OK
 	adminGetReq := httptest.NewRequest(http.MethodGet, "/api/v1/orders/"+createdOrder.ID, nil)
 	adminGetReq.Header.Set("Authorization", "Bearer "+adminToken)
 	adminGetW := httptest.NewRecorder()
@@ -139,7 +207,7 @@ func TestOrder_CreateAndGet(t *testing.T) {
 		t.Fatalf("expected 200 OK for Admin viewing order, got %d: %s", adminGetW.Code, adminGetW.Body.String())
 	}
 
-	// 8. Non-existent order -> 404
+	// 9. Non-existent order -> 404
 	missingReq := httptest.NewRequest(http.MethodGet, "/api/v1/orders/00000000-0000-0000-0000-000000000000", nil)
 	missingReq.Header.Set("Authorization", "Bearer "+studentToken)
 	missingW := httptest.NewRecorder()
@@ -147,6 +215,425 @@ func TestOrder_CreateAndGet(t *testing.T) {
 
 	if missingW.Code != http.StatusNotFound {
 		t.Errorf("expected 404 Not Found for nonexistent order, got %d", missingW.Code)
+	}
+}
+
+func TestOrder_IdempotentReplayAndReuse(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	user, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	menuRepo := repository.NewMenuRepository(db)
+	invRepo := repository.NewInventoryRepository(db)
+
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("IdemBurger_%d", time.Now().UnixNano()), "Burger", 100.0, "", true, 10)
+	if err != nil {
+		t.Fatalf("failed to seed item: %v", err)
+	}
+
+	// Add item to cart (qty 2)
+	b, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 2})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b))
+	addReq.Header.Set("Authorization", "Bearer "+studentToken)
+	addReq.Header.Set("Content-Type", "application/json")
+	addW := httptest.NewRecorder()
+	router.ServeHTTP(addW, addReq)
+	if addW.Code != http.StatusOK {
+		t.Fatalf("failed to add item to cart: %s", addW.Body.String())
+	}
+
+	idempotencyKey := fmt.Sprintf("replay_test_key_%d", time.Now().UnixNano())
+
+	// 1. Initial Request -> 201 Created
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req1.Header.Set("Authorization", "Bearer "+studentToken)
+	req1.Header.Set("Idempotency-Key", idempotencyKey)
+	w1 := httptest.NewRecorder()
+	router.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusCreated {
+		t.Fatalf("first request failed: %d: %s", w1.Code, w1.Body.String())
+	}
+
+	var firstOrder models.OrderResponse
+	_ = json.Unmarshal(w1.Body.Bytes(), &firstOrder)
+
+	// Verify inventory decreased from 10 to 8
+	invAfter1, err := invRepo.GetByMenuItemID(context.Background(), item.ID)
+	if err != nil || invAfter1.Quantity != 8 {
+		t.Fatalf("expected inventory 8 after first checkout, got %d", invAfter1.Quantity)
+	}
+
+	// 2. Replay the exact same request with the same Idempotency-Key
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req2.Header.Set("Authorization", "Bearer "+studentToken)
+	req2.Header.Set("Idempotency-Key", idempotencyKey)
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusCreated && w2.Code != http.StatusOK {
+		t.Fatalf("replay request failed: %d: %s", w2.Code, w2.Body.String())
+	}
+
+	var replayedOrder models.OrderResponse
+	_ = json.Unmarshal(w2.Body.Bytes(), &replayedOrder)
+
+	// Assert that the exact same order is returned
+	if replayedOrder.ID != firstOrder.ID {
+		t.Errorf("expected replayed order ID %s, got %s", firstOrder.ID, replayedOrder.ID)
+	}
+	if replayedOrder.TotalAmount != firstOrder.TotalAmount {
+		t.Errorf("expected total amount %f, got %f", firstOrder.TotalAmount, replayedOrder.TotalAmount)
+	}
+
+	// 3. Verify in database that no second order or reservation was created
+	var totalOrdersCount int
+	err = db.Pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM orders WHERE user_id = $1", user.ID).Scan(&totalOrdersCount)
+	if err != nil || totalOrdersCount != 1 {
+		t.Errorf("expected exactly 1 order in DB, got %d", totalOrdersCount)
+	}
+
+	var totalReservationsCount int
+	err = db.Pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM inventory_reservations WHERE order_id = $1", firstOrder.ID).Scan(&totalReservationsCount)
+	if err != nil || totalReservationsCount != 1 {
+		t.Errorf("expected exactly 1 reservation in DB, got %d", totalReservationsCount)
+	}
+
+	// Verify inventory did NOT decrease again (still 8)
+	invAfter2, err := invRepo.GetByMenuItemID(context.Background(), item.ID)
+	if err != nil || invAfter2.Quantity != 8 {
+		t.Errorf("inventory was erroneously decremented on replay: expected 8, got %d", invAfter2.Quantity)
+	}
+}
+
+func TestOrder_ConcurrentSameKeyRequests(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	user, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	menuRepo := repository.NewMenuRepository(db)
+	invRepo := repository.NewInventoryRepository(db)
+
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("ConcIdemItem_%d", time.Now().UnixNano()), "Noodles", 80.0, "", true, 10)
+	if err != nil {
+		t.Fatalf("failed to seed menu item: %v", err)
+	}
+
+	// Add item to cart (qty 2)
+	b, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 2})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b))
+	addReq.Header.Set("Authorization", "Bearer "+studentToken)
+	addReq.Header.Set("Content-Type", "application/json")
+	addW := httptest.NewRecorder()
+	router.ServeHTTP(addW, addReq)
+	if addW.Code != http.StatusOK {
+		t.Fatalf("failed to add item: %s", addW.Body.String())
+	}
+
+	idempotencyKey := fmt.Sprintf("concurrent_same_key_%d", time.Now().UnixNano())
+
+	startBarrier := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	responses := make([]*httptest.ResponseRecorder, 2)
+
+	for i := 0; i < 2; i++ {
+		idx := i
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+			req.Header.Set("Authorization", "Bearer "+studentToken)
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+
+			<-startBarrier
+			router.ServeHTTP(w, req)
+			responses[idx] = w
+		}()
+	}
+
+	close(startBarrier)
+	wg.Wait()
+
+	// Both requests should either return the successful order (201/200) or one returns 409 Conflict (processing)
+	// In all cases, only 1 order and 1 reservation must be created in PostgreSQL
+	for _, w := range responses {
+		if w.Code != http.StatusCreated && w.Code != http.StatusOK && w.Code != http.StatusConflict {
+			t.Errorf("unexpected status code for concurrent same-key request: %d (body: %s)", w.Code, w.Body.String())
+		}
+	}
+
+	// Verify database state: exactly 1 order
+	var orderCount int
+	err = db.Pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM orders WHERE user_id = $1", user.ID).Scan(&orderCount)
+	if err != nil || orderCount != 1 {
+		t.Errorf("expected exactly 1 order in DB for concurrent same-key requests, got %d", orderCount)
+	}
+
+	// Verify inventory was deducted only once (10 - 2 = 8)
+	inv, err := invRepo.GetByMenuItemID(context.Background(), item.ID)
+	if err != nil || inv.Quantity != 8 {
+		t.Errorf("expected inventory to be 8, got %d", inv.Quantity)
+	}
+}
+
+func TestOrder_DifferentUsersSameKeyIsolation(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	user1, studentToken1 := createRealTestUser(t, db, tokenService, models.RoleStudent)
+	user2, studentToken2 := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	menuRepo := repository.NewMenuRepository(db)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("SharedKeyItem_%d", time.Now().UnixNano()), "Wrap", 60.0, "", true, 20)
+	if err != nil {
+		t.Fatalf("failed to seed menu item: %v", err)
+	}
+
+	// Both users add 1 wrap to cart
+	for _, tok := range []string{studentToken1, studentToken2} {
+		b, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 1})
+		addReq := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b))
+		addReq.Header.Set("Authorization", "Bearer "+tok)
+		addReq.Header.Set("Content-Type", "application/json")
+		addW := httptest.NewRecorder()
+		router.ServeHTTP(addW, addReq)
+		if addW.Code != http.StatusOK {
+			t.Fatalf("failed to add item: %s", addW.Body.String())
+		}
+	}
+
+	sharedKey := fmt.Sprintf("common_user_key_%d", time.Now().UnixNano())
+
+	// User 1 checkouts with sharedKey
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req1.Header.Set("Authorization", "Bearer "+studentToken1)
+	req1.Header.Set("Idempotency-Key", sharedKey)
+	w1 := httptest.NewRecorder()
+	router.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusCreated {
+		t.Fatalf("user 1 checkout failed: %d: %s", w1.Code, w1.Body.String())
+	}
+	var order1 models.OrderResponse
+	_ = json.Unmarshal(w1.Body.Bytes(), &order1)
+
+	// User 2 checkouts with same textual sharedKey
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req2.Header.Set("Authorization", "Bearer "+studentToken2)
+	req2.Header.Set("Idempotency-Key", sharedKey)
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("user 2 checkout failed: %d: %s", w2.Code, w2.Body.String())
+	}
+	var order2 models.OrderResponse
+	_ = json.Unmarshal(w2.Body.Bytes(), &order2)
+
+	// Verify User 2 received their own distinct order
+	if order1.ID == order2.ID {
+		t.Errorf("security violation: User 1 and User 2 shared the same order ID %s", order1.ID)
+	}
+	if order1.UserID != user1.ID || order2.UserID != user2.ID {
+		t.Errorf("order user IDs do not match respective users: order1=%s, order2=%s", order1.UserID, order2.UserID)
+	}
+}
+
+func TestOrder_Checkout_InsufficientInventory(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	_, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	menuRepo := repository.NewMenuRepository(db)
+	invRepo := repository.NewInventoryRepository(db)
+
+	// Create item with only 2 units in inventory
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("ScarceItem_%d", time.Now().UnixNano()), "Limited Item", 100.0, "", true, 2)
+	if err != nil {
+		t.Fatalf("failed to seed menu item: %v", err)
+	}
+
+	// Student adds 3 units to cart (exceeding stock)
+	b, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 3})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b))
+	addReq.Header.Set("Authorization", "Bearer "+studentToken)
+	addReq.Header.Set("Content-Type", "application/json")
+	addW := httptest.NewRecorder()
+	router.ServeHTTP(addW, addReq)
+	if addW.Code != http.StatusOK {
+		t.Fatalf("failed to add item to cart: %s", addW.Body.String())
+	}
+
+	// Attempt checkout -> 400 Bad Request
+	checkoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	checkoutReq.Header.Set("Authorization", "Bearer "+studentToken)
+	checkoutReq.Header.Set("Idempotency-Key", fmt.Sprintf("insufficient_stock_key_%d", time.Now().UnixNano()))
+	checkoutW := httptest.NewRecorder()
+	router.ServeHTTP(checkoutW, checkoutReq)
+
+	if checkoutW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request due to insufficient stock, got %d: %s", checkoutW.Code, checkoutW.Body.String())
+	}
+
+	// Verify inventory quantity is untouched (still 2)
+	inv, err := invRepo.GetByMenuItemID(context.Background(), item.ID)
+	if err != nil || inv.Quantity != 2 {
+		t.Errorf("expected inventory to remain 2 after failed checkout, got %d", inv.Quantity)
+	}
+
+	// Verify user's cart is preserved so they can modify and retry
+	getCartReq := httptest.NewRequest(http.MethodGet, "/api/v1/cart", nil)
+	getCartReq.Header.Set("Authorization", "Bearer "+studentToken)
+	getCartW := httptest.NewRecorder()
+	router.ServeHTTP(getCartW, getCartReq)
+
+	var cart models.CartResponse
+	_ = json.Unmarshal(getCartW.Body.Bytes(), &cart)
+	if len(cart.Items) != 1 || cart.Items[0].Quantity != 3 {
+		t.Errorf("expected cart to be preserved with 3 items, got %+v", cart.Items)
+	}
+}
+
+func TestOrder_Checkout_UnavailableMenuItem(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	_, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	menuRepo := repository.NewMenuRepository(db)
+
+	// Create item initially available
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("UnavailableItem_%d", time.Now().UnixNano()), "Item", 50.0, "", true, 10)
+	if err != nil {
+		t.Fatalf("failed to seed menu item: %v", err)
+	}
+
+	// Add to cart
+	b, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 1})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b))
+	addReq.Header.Set("Authorization", "Bearer "+studentToken)
+	addReq.Header.Set("Content-Type", "application/json")
+	addW := httptest.NewRecorder()
+	router.ServeHTTP(addW, addReq)
+	if addW.Code != http.StatusOK {
+		t.Fatalf("failed to add item: %s", addW.Body.String())
+	}
+
+	// Admin disables menu item (is_available = false)
+	isAvail := false
+	_, err = menuRepo.Update(context.Background(), item.ID, nil, nil, nil, nil, &isAvail)
+	if err != nil {
+		t.Fatalf("failed to disable menu item: %v", err)
+	}
+
+	// Attempt checkout -> 400 Bad Request
+	checkoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	checkoutReq.Header.Set("Authorization", "Bearer "+studentToken)
+	checkoutReq.Header.Set("Idempotency-Key", fmt.Sprintf("unavail_key_%d", time.Now().UnixNano()))
+	checkoutW := httptest.NewRecorder()
+	router.ServeHTTP(checkoutW, checkoutReq)
+
+	if checkoutW.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for unavailable item, got %d: %s", checkoutW.Code, checkoutW.Body.String())
+	}
+}
+
+func TestOrder_Checkout_ConcurrentStockExhaustion(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	// Create 2 real distinct student users
+	_, studentToken1 := createRealTestUser(t, db, tokenService, models.RoleStudent)
+	_, studentToken2 := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	menuRepo := repository.NewMenuRepository(db)
+	invRepo := repository.NewInventoryRepository(db)
+
+	// Exactly 1 unit in inventory
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("LastItem_%d", time.Now().UnixNano()), "Sole Item", 99.0, "", true, 1)
+	if err != nil {
+		t.Fatalf("failed to create menu item: %v", err)
+	}
+
+	// Both students add 1 unit to their carts
+	for _, token := range []string{studentToken1, studentToken2} {
+		b, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 1})
+		addReq := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b))
+		addReq.Header.Set("Authorization", "Bearer "+token)
+		addReq.Header.Set("Content-Type", "application/json")
+		addW := httptest.NewRecorder()
+		router.ServeHTTP(addW, addReq)
+		if addW.Code != http.StatusOK {
+			t.Fatalf("failed to add item to cart: %s", addW.Body.String())
+		}
+	}
+
+	// Concurrency synchronization barrier
+	startBarrier := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	responses := make([]*httptest.ResponseRecorder, 2)
+
+	tokens := []string{studentToken1, studentToken2}
+	for i := 0; i < 2; i++ {
+		idx := i
+		go func(token string) {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Idempotency-Key", fmt.Sprintf("race_student_%d_%d", idx, time.Now().UnixNano()))
+
+			<-startBarrier // await simultaneous release
+			router.ServeHTTP(w, req)
+			responses[idx] = w
+		}(tokens[idx])
+	}
+
+	// Trigger simultaneous execution
+	close(startBarrier)
+	wg.Wait()
+
+	// Analyze outcomes
+	var successCount, failureCount int
+	for _, w := range responses {
+		if w.Code == http.StatusCreated {
+			successCount++
+		} else if w.Code == http.StatusBadRequest {
+			failureCount++
+		} else {
+			t.Errorf("unexpected status code in concurrent checkout: %d (body: %s)", w.Code, w.Body.String())
+		}
+	}
+
+	if successCount != 1 {
+		t.Errorf("expected exactly 1 successful checkout, got %d", successCount)
+	}
+	if failureCount != 1 {
+		t.Errorf("expected exactly 1 failed checkout due to insufficient stock, got %d", failureCount)
+	}
+
+	// Verify inventory is exactly 0 and never went negative
+	inv, err := invRepo.GetByMenuItemID(context.Background(), item.ID)
+	if err != nil {
+		t.Fatalf("failed to query inventory: %v", err)
+	}
+	if inv.Quantity != 0 {
+		t.Errorf("expected inventory quantity 0, got %d", inv.Quantity)
+	}
+
+	// Verify exactly 1 reservation exists in the database for this menu item
+	var reservationCount int
+	err = db.Pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM inventory_reservations WHERE menu_item_id = $1", item.ID).Scan(&reservationCount)
+	if err != nil {
+		t.Fatalf("failed to count reservations: %v", err)
+	}
+	if reservationCount != 1 {
+		t.Errorf("expected exactly 1 reservation row, got %d", reservationCount)
 	}
 }
 
@@ -198,5 +685,67 @@ func TestOrder_List(t *testing.T) {
 
 	if unauthW.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 Unauthorized for unauthenticated order list, got %d", unauthW.Code)
+	}
+}
+
+func TestOrder_DifferentKeysSeparateOperations(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	user, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+
+	menuRepo := repository.NewMenuRepository(db)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("DiffKeyItem_%d", time.Now().UnixNano()), "Toast", 30.0, "", true, 20)
+	if err != nil {
+		t.Fatalf("failed to seed item: %v", err)
+	}
+
+	// First checkout with Key 1
+	b1, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 1})
+	addReq1 := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b1))
+	addReq1.Header.Set("Authorization", "Bearer "+studentToken)
+	addReq1.Header.Set("Content-Type", "application/json")
+	wAdd1 := httptest.NewRecorder()
+	router.ServeHTTP(wAdd1, addReq1)
+
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req1.Header.Set("Authorization", "Bearer "+studentToken)
+	req1.Header.Set("Idempotency-Key", fmt.Sprintf("first_key_%d", time.Now().UnixNano()))
+	w1 := httptest.NewRecorder()
+	router.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusCreated {
+		t.Fatalf("first checkout failed: %d: %s", w1.Code, w1.Body.String())
+	}
+	var order1 models.OrderResponse
+	_ = json.Unmarshal(w1.Body.Bytes(), &order1)
+
+	// Second checkout with Key 2
+	b2, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 2})
+	addReq2 := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b2))
+	addReq2.Header.Set("Authorization", "Bearer "+studentToken)
+	addReq2.Header.Set("Content-Type", "application/json")
+	wAdd2 := httptest.NewRecorder()
+	router.ServeHTTP(wAdd2, addReq2)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/orders", nil)
+	req2.Header.Set("Authorization", "Bearer "+studentToken)
+	req2.Header.Set("Idempotency-Key", fmt.Sprintf("second_key_%d", time.Now().UnixNano()))
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("second checkout failed: %d: %s", w2.Code, w2.Body.String())
+	}
+	var order2 models.OrderResponse
+	_ = json.Unmarshal(w2.Body.Bytes(), &order2)
+
+	// Verify two distinct orders were created
+	if order1.ID == order2.ID {
+		t.Errorf("expected two distinct orders for different idempotency keys, got same ID %s", order1.ID)
+	}
+
+	var totalOrders int
+	_ = db.Pool.QueryRow(context.Background(), "SELECT COUNT(*) FROM orders WHERE user_id = $1", user.ID).Scan(&totalOrders)
+	if totalOrders != 2 {
+		t.Errorf("expected 2 orders in DB, got %d", totalOrders)
 	}
 }

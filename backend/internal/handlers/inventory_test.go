@@ -19,7 +19,7 @@ func TestInventory_ReadAndList(t *testing.T) {
 	defer db.Close()
 
 	menuRepo := repository.NewMenuRepository(db)
-	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Samosa_%d", time.Now().UnixNano()), "Crispy potato samosa", 15.0, true, 40)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Samosa_%d", time.Now().UnixNano()), "Crispy potato samosa", 15.0, "", true, 40)
 	if err != nil {
 		t.Fatalf("failed to seed menu item: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestInventory_Update(t *testing.T) {
 	studentToken, adminToken := createTestTokens(t, tokenService)
 
 	menuRepo := repository.NewMenuRepository(db)
-	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Chai_%d", time.Now().UnixNano()), "Hot masala tea", 10.0, true, 20)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Chai_%d", time.Now().UnixNano()), "Hot masala tea", 10.0, "", true, 20)
 	if err != nil {
 		t.Fatalf("failed to seed menu item: %v", err)
 	}

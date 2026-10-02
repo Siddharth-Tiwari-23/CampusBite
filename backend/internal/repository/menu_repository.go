@@ -26,13 +26,21 @@ func NewMenuRepository(db *database.DB) *MenuRepository {
 	return &MenuRepository{db: db}
 }
 
-// GetAll retrieves all menu items ordered by creation date.
-func (r *MenuRepository) GetAll(ctx context.Context) ([]models.MenuItem, error) {
+// GetAll retrieves menu items ordered by creation date. If onlyAvailable is true (default), returns is_available = true only.
+func (r *MenuRepository) GetAll(ctx context.Context, onlyAvailable ...bool) ([]models.MenuItem, error) {
+	filterAvailable := true
+	if len(onlyAvailable) > 0 {
+		filterAvailable = onlyAvailable[0]
+	}
+
 	query := `
-		SELECT id, name, COALESCE(description, ''), price, is_available, created_at, updated_at
+		SELECT id, name, COALESCE(description, ''), price, COALESCE(image_url, ''), is_available, created_at, updated_at
 		FROM menu_items
-		ORDER BY created_at ASC
 	`
+	if filterAvailable {
+		query += ` WHERE is_available = true `
+	}
+	query += ` ORDER BY created_at ASC `
 
 	rows, err := r.db.Pool.Query(ctx, query)
 	if err != nil {
@@ -48,6 +56,7 @@ func (r *MenuRepository) GetAll(ctx context.Context) ([]models.MenuItem, error) 
 			&item.Name,
 			&item.Description,
 			&item.Price,
+			&item.ImageURL,
 			&item.IsAvailable,
 			&item.CreatedAt,
 			&item.UpdatedAt,
@@ -63,7 +72,7 @@ func (r *MenuRepository) GetAll(ctx context.Context) ([]models.MenuItem, error) 
 // GetByID retrieves a single menu item by its UUID.
 func (r *MenuRepository) GetByID(ctx context.Context, id string) (*models.MenuItem, error) {
 	query := `
-		SELECT id, name, COALESCE(description, ''), price, is_available, created_at, updated_at
+		SELECT id, name, COALESCE(description, ''), price, COALESCE(image_url, ''), is_available, created_at, updated_at
 		FROM menu_items
 		WHERE id = $1
 	`
@@ -74,6 +83,7 @@ func (r *MenuRepository) GetByID(ctx context.Context, id string) (*models.MenuIt
 		&item.Name,
 		&item.Description,
 		&item.Price,
+		&item.ImageURL,
 		&item.IsAvailable,
 		&item.CreatedAt,
 		&item.UpdatedAt,
@@ -90,7 +100,7 @@ func (r *MenuRepository) GetByID(ctx context.Context, id string) (*models.MenuIt
 }
 
 // Create inserts a new menu item and its initial inventory record in a single transaction.
-func (r *MenuRepository) Create(ctx context.Context, name, description string, price float64, isAvailable bool, initialQuantity int) (*models.MenuItem, error) {
+func (r *MenuRepository) Create(ctx context.Context, name, description string, price float64, imageURL string, isAvailable bool, initialQuantity int) (*models.MenuItem, error) {
 	tx, err := r.db.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
@@ -98,17 +108,18 @@ func (r *MenuRepository) Create(ctx context.Context, name, description string, p
 	defer tx.Rollback(ctx)
 
 	menuQuery := `
-		INSERT INTO menu_items (name, description, price, is_available)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, name, COALESCE(description, ''), price, is_available, created_at, updated_at
+		INSERT INTO menu_items (name, description, price, image_url, is_available)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, name, COALESCE(description, ''), price, COALESCE(image_url, ''), is_available, created_at, updated_at
 	`
 
 	var item models.MenuItem
-	err = tx.QueryRow(ctx, menuQuery, name, description, price, isAvailable).Scan(
+	err = tx.QueryRow(ctx, menuQuery, name, description, price, imageURL, isAvailable).Scan(
 		&item.ID,
 		&item.Name,
 		&item.Description,
 		&item.Price,
+		&item.ImageURL,
 		&item.IsAvailable,
 		&item.CreatedAt,
 		&item.UpdatedAt,
@@ -134,7 +145,7 @@ func (r *MenuRepository) Create(ctx context.Context, name, description string, p
 }
 
 // Update updates selected fields of an existing menu item.
-func (r *MenuRepository) Update(ctx context.Context, id string, name *string, description *string, price *float64, isAvailable *bool) (*models.MenuItem, error) {
+func (r *MenuRepository) Update(ctx context.Context, id string, name *string, description *string, price *float64, imageURL *string, isAvailable *bool) (*models.MenuItem, error) {
 	current, err := r.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -155,6 +166,11 @@ func (r *MenuRepository) Update(ctx context.Context, id string, name *string, de
 		newPrice = *price
 	}
 
+	newImageURL := current.ImageURL
+	if imageURL != nil {
+		newImageURL = *imageURL
+	}
+
 	newAvailable := current.IsAvailable
 	if isAvailable != nil {
 		newAvailable = *isAvailable
@@ -162,17 +178,18 @@ func (r *MenuRepository) Update(ctx context.Context, id string, name *string, de
 
 	updateQuery := `
 		UPDATE menu_items
-		SET name = $1, description = $2, price = $3, is_available = $4, updated_at = NOW()
-		WHERE id = $5
-		RETURNING id, name, COALESCE(description, ''), price, is_available, created_at, updated_at
+		SET name = $1, description = $2, price = $3, image_url = $4, is_available = $5, updated_at = NOW()
+		WHERE id = $6
+		RETURNING id, name, COALESCE(description, ''), price, COALESCE(image_url, ''), is_available, created_at, updated_at
 	`
 
 	var item models.MenuItem
-	err = r.db.Pool.QueryRow(ctx, updateQuery, newName, newDesc, newPrice, newAvailable, id).Scan(
+	err = r.db.Pool.QueryRow(ctx, updateQuery, newName, newDesc, newPrice, newImageURL, newAvailable, id).Scan(
 		&item.ID,
 		&item.Name,
 		&item.Description,
 		&item.Price,
+		&item.ImageURL,
 		&item.IsAvailable,
 		&item.CreatedAt,
 		&item.UpdatedAt,

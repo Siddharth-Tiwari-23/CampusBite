@@ -123,7 +123,7 @@ func TestMenu_GetAndList(t *testing.T) {
 	defer db.Close()
 
 	menuRepo := repository.NewMenuRepository(db)
-	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Pizza_%d", time.Now().UnixNano()), "Cheesy pizza", 250.0, true, 10)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Pizza_%d", time.Now().UnixNano()), "Cheesy pizza", 250.0, "", true, 10)
 	if err != nil {
 		t.Fatalf("failed to seed menu item: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestMenu_UpdateAndDelete(t *testing.T) {
 	studentToken, adminToken := createTestTokens(t, tokenService)
 
 	menuRepo := repository.NewMenuRepository(db)
-	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Roll_%d", time.Now().UnixNano()), "Egg roll", 60.0, true, 5)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("Roll_%d", time.Now().UnixNano()), "Egg roll", 60.0, "", true, 5)
 	if err != nil {
 		t.Fatalf("failed to seed menu item: %v", err)
 	}

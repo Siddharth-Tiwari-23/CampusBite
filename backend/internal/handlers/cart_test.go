@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,12 +18,15 @@ import (
 	"campusbite/internal/repository"
 )
 
+var userSeq uint64
+
 func createRealTestUser(t *testing.T, db *database.DB, tokenService *auth.TokenService, role string) (*models.User, string) {
+	seq := atomic.AddUint64(&userSeq, 1)
 	userRepo := repository.NewUserRepository(db)
 	user, err := userRepo.Create(
 		context.Background(),
 		"Test User",
-		fmt.Sprintf("user_%d@campusbite.internal", time.Now().UnixNano()),
+		fmt.Sprintf("user_%d_%d_%d@campusbite.internal", time.Now().UnixNano(), seq, rand.Intn(100000)),
 		"hashed_pass_placeholder",
 		role,
 	)
@@ -42,12 +47,12 @@ func TestCart_AddAndGet(t *testing.T) {
 	_, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
 
 	menuRepo := repository.NewMenuRepository(db)
-	item1, err := menuRepo.Create(context.Background(), fmt.Sprintf("CartItem1_%d", time.Now().UnixNano()), "Item 1", 50.0, true, 10)
+	item1, err := menuRepo.Create(context.Background(), fmt.Sprintf("CartItem1_%d", time.Now().UnixNano()), "Item 1", 50.0, "", true, 10)
 	if err != nil {
 		t.Fatalf("failed to seed menu item: %v", err)
 	}
 
-	item2, err := menuRepo.Create(context.Background(), fmt.Sprintf("CartItem2_%d", time.Now().UnixNano()), "Item 2", 75.0, true, 10)
+	item2, err := menuRepo.Create(context.Background(), fmt.Sprintf("CartItem2_%d", time.Now().UnixNano()), "Item 2", 75.0, "", true, 10)
 	if err != nil {
 		t.Fatalf("failed to seed menu item: %v", err)
 	}
@@ -198,7 +203,7 @@ func TestCart_UpdateAndDelete(t *testing.T) {
 	_, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
 
 	menuRepo := repository.NewMenuRepository(db)
-	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("UpdateItem_%d", time.Now().UnixNano()), "Test Item", 40.0, true, 10)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("UpdateItem_%d", time.Now().UnixNano()), "Test Item", 40.0, "", true, 10)
 	if err != nil {
 		t.Fatalf("failed to seed menu item: %v", err)
 	}

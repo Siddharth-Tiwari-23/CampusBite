@@ -5,6 +5,7 @@ type CartItemResponse struct {
 	MenuItemID string  `json:"menu_item_id"`
 	Name       string  `json:"name"`
 	Price      float64 `json:"price"`
+	ImageURL   string  `json:"image_url,omitempty"`
 	Quantity   int     `json:"quantity"`
 	Subtotal   float64 `json:"subtotal"`
 }
@@ -20,6 +21,7 @@ type CartResponse struct {
 // AddToCartRequest represents the payload for adding an item to the cart.
 type AddToCartRequest struct {
 	MenuItemID string `json:"menu_item_id"`
+	ItemID     string `json:"item_id,omitempty"`
 	Quantity   int    `json:"quantity"`
 }
 

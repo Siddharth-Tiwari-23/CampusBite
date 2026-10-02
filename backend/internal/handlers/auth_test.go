@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"campusbite/internal/auth"
+	"campusbite/internal/cache"
 	"campusbite/internal/config"
 	"campusbite/internal/database"
 	"campusbite/internal/models"
@@ -43,7 +44,7 @@ func setupIntegrationApp(t *testing.T) (*gin.Engine, *database.DB, *auth.TokenSe
 		t.Fatalf("failed to create token service: %v", err)
 	}
 
-	router := routes.SetupRouter(db, tokenService)
+	router := routes.SetupRouter(db, tokenService, cache.NewNoOpCache())
 	return router, db, tokenService
 }
 

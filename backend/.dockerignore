@@ -1,0 +1,18 @@
+# Go build & test artifacts
+bin/
+tmp/
+*.exe
+*.test
+*.out
+*.log
+
+# Git & IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Local environment files
+.env
+.env.*
+*.local

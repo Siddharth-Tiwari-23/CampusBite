@@ -1,4 +1,7 @@
 services:
+  # ============================================================================
+  # 1. PostgreSQL 18 Database (Authoritative Source of Truth)
+  # ============================================================================
   postgres:
     image: postgres:18
     container_name: campusbite-postgres
@@ -9,16 +12,85 @@ services:
       POSTGRES_PASSWORD: campusbite_dev
       PGDATA: /var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U campusbite -d campusbite"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
+  # ============================================================================
+  # 2. Redis 8 Cache & Atomic Rate Limiter
+  # ============================================================================
   redis:
-    image: redis:8
+    image: redis:8-alpine
     container_name: campusbite-redis
     restart: unless-stopped
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # 3. Optional Containerized Go Backend (Profile: "app" / "full")
+  # Note: For host-based development, run `go run ./cmd/server` on your host.
+  # To run everything in containers: `docker compose --profile full up -d --build`
+  # ============================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: campusbite-backend
+    restart: unless-stopped
+    profiles: ["app", "full"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://campusbite:campusbite_dev@postgres:5432/campusbite?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-insecure-jwt-secret-campusbite-change-in-prod}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-rzp_test_campusbite_mock_key}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-rzp_test_campusbite_mock_secret}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-rzp_test_campusbite_mock_webhook_secret}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      MENU_CACHE_TTL_SECONDS: 60
+      RESERVATION_WORKER_INTERVAL_SECONDS: 30
+      IDEMPOTENCY_CLEANUP_INTERVAL_SECONDS: 3600
+    ports:
+      - "8080:8080"
+
+  # ============================================================================
+  # 4. Optional Containerized React Frontend (Profile: "full")
+  # ============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:8080/api/v1
+        VITE_WS_URL: ws://localhost:8080/api/v1/ws
+    container_name: campusbite-frontend
+    restart: unless-stopped
+    profiles: ["full"]
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
 
 volumes:
   postgres_data:
+    name: campusbite_postgres_data
+  redis_data:
+    name: campusbite_redis_data

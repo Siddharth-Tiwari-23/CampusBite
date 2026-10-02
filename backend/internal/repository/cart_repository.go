@@ -55,6 +55,7 @@ func (r *CartRepository) GetCart(ctx context.Context, userID string) (*models.Ca
 			ci.menu_item_id,
 			m.name,
 			m.price,
+			COALESCE(m.image_url, '') AS image_url,
 			ci.quantity,
 			ROUND((ci.quantity * m.price)::numeric, 2) AS subtotal
 		FROM cart_items ci
@@ -78,6 +79,7 @@ func (r *CartRepository) GetCart(ctx context.Context, userID string) (*models.Ca
 			&item.MenuItemID,
 			&item.Name,
 			&item.Price,
+			&item.ImageURL,
 			&item.Quantity,
 			&item.Subtotal,
 		); err != nil {

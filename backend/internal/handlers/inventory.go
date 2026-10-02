@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"errors"
+	"log"
 	"net/http"
 
+	"campusbite/internal/cache"
 	"campusbite/internal/models"
 	"campusbite/internal/repository"
 
@@ -13,11 +16,19 @@ import (
 // InventoryHandler handles HTTP requests for inventory management.
 type InventoryHandler struct {
 	inventoryRepo *repository.InventoryRepository
+	cacheService  cache.CacheService
 }
 
 // NewInventoryHandler creates a new InventoryHandler instance.
-func NewInventoryHandler(inventoryRepo *repository.InventoryRepository) *InventoryHandler {
-	return &InventoryHandler{inventoryRepo: inventoryRepo}
+func NewInventoryHandler(inventoryRepo *repository.InventoryRepository, cacheService ...cache.CacheService) *InventoryHandler {
+	var cs cache.CacheService
+	if len(cacheService) > 0 {
+		cs = cacheService[0]
+	}
+	return &InventoryHandler{
+		inventoryRepo: inventoryRepo,
+		cacheService:  cs,
+	}
 }
 
 // GetInventory returns the current inventory quantities for all items.
@@ -87,5 +98,16 @@ func (h *InventoryHandler) UpdateInventory(c *gin.Context) {
 		return
 	}
 
+	// Invalidate menu cache after inventory modification
+	h.invalidateCache(c.Request.Context())
+
 	c.JSON(http.StatusOK, item)
+}
+
+func (h *InventoryHandler) invalidateCache(ctx context.Context) {
+	if h.cacheService != nil {
+		if err := h.cacheService.Del(ctx, cache.KeyMenuAvailable); err != nil {
+			log.Printf("[InventoryHandler] Warning: failed to invalidate cache key '%s': %v", cache.KeyMenuAvailable, err)
+		}
+	}
 }
