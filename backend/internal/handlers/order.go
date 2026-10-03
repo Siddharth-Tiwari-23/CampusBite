@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -60,7 +61,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		_ = c.ShouldBindJSON(&req)
 	}
 
-	order, err := h.orderRepo.CreateFromCart(c.Request.Context(), userID, idempotencyKey, "", req.PaymentMethod)
+	order, created, err := h.orderRepo.CreateFromCartWithStatus(c.Request.Context(), userID, idempotencyKey, "", req.PaymentMethod)
 	if err != nil {
 		if errors.Is(err, repository.ErrIdempotencyProcessing) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -86,9 +87,11 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 		return
 	}
 
-	// Notify connected admins in real time about the new order after successful commit
-	if h.hub != nil {
+	// Notify connected admins in real time about the new order after successful commit.
+	// Idempotent replays (created == false) must not re-emit any events.
+	if h.hub != nil && created {
 		h.hub.BroadcastToAdmins(ws.NewOrderCreatedEvent(order.ID, order.UserID, order.TotalAmount))
+		log.Printf("[OrderHandler] NEW_ORDER broadcast for order %s to %d admin connection(s)", order.ID, h.hub.GetAdminCount())
 		if order.Status == models.OrderStatusConfirmed {
 			h.hub.SendToUser(order.UserID, ws.NewOrderStatusUpdatedEvent(order.ID, models.OrderStatusConfirmed))
 		}

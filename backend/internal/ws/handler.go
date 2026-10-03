@@ -73,6 +73,7 @@ func (h *WSHandler) HandleWS(c *gin.Context) {
 	// Initialize and register client
 	client := NewClient(h.hub, conn, claims.UserID, claims.Role)
 	h.hub.Register(client)
+	log.Printf("[WSHandler] Client registered user=%s role=%s (admin connections: %d)", claims.UserID, claims.Role, h.hub.GetAdminCount())
 
 	// Start pump loops
 	go client.WritePump()

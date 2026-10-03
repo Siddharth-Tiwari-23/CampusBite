@@ -970,3 +970,126 @@ func TestOrder_CashOnDelivery_FullFlowAndNotifications(t *testing.T) {
 		t.Errorf("expected completed notification message, got '%s'", compMsg)
 	}
 }
+
+func TestOrder_AdminPersistentNotificationsAndIdempotency(t *testing.T) {
+	router, db, tokenService := setupIntegrationApp(t)
+	defer db.Close()
+
+	_, studentToken := createRealTestUser(t, db, tokenService, models.RoleStudent)
+	admin1, admin1Token := createRealTestUser(t, db, tokenService, models.RoleAdmin)
+	admin2, _ := createRealTestUser(t, db, tokenService, models.RoleAdmin)
+
+	menuRepo := repository.NewMenuRepository(db)
+	item, err := menuRepo.Create(context.Background(), fmt.Sprintf("AdminNotifItem_%d", time.Now().UnixNano()), "Admin Notif Burger", 80.0, "", true, 20)
+	if err != nil {
+		t.Fatalf("failed to create menu item: %v", err)
+	}
+
+	// Add item to cart
+	b, _ := json.Marshal(models.AddToCartRequest{MenuItemID: item.ID, Quantity: 2})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/cart/items", bytes.NewBuffer(b))
+	addReq.Header.Set("Authorization", "Bearer "+studentToken)
+	addReq.Header.Set("Content-Type", "application/json")
+	addW := httptest.NewRecorder()
+	router.ServeHTTP(addW, addReq)
+	if addW.Code != http.StatusOK {
+		t.Fatalf("failed to add item to cart: %d %s", addW.Code, addW.Body.String())
+	}
+
+	// 1. Initial checkout with Idempotency-Key
+	idempKey := fmt.Sprintf("admin_notif_key_%d", time.Now().UnixNano())
+	checkoutBody, _ := json.Marshal(map[string]string{"payment_method": "COD"})
+	reqCheckout := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBuffer(checkoutBody))
+	reqCheckout.Header.Set("Authorization", "Bearer "+studentToken)
+	reqCheckout.Header.Set("Idempotency-Key", idempKey)
+	reqCheckout.Header.Set("Content-Type", "application/json")
+	wCheckout := httptest.NewRecorder()
+	router.ServeHTTP(wCheckout, reqCheckout)
+
+	if wCheckout.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", wCheckout.Code, wCheckout.Body.String())
+	}
+
+	var createdOrder models.OrderResponse
+	if err := json.Unmarshal(wCheckout.Body.Bytes(), &createdOrder); err != nil {
+		t.Fatalf("failed to parse order response: %v", err)
+	}
+
+	// Verify Admin 1 persistent notification in DB
+	var admin1NotifCount int
+	err = db.Pool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM notifications
+		WHERE user_id = $1 AND title = 'New Order' AND data->>'order_id' = $2
+	`, admin1.ID, createdOrder.ID).Scan(&admin1NotifCount)
+	if err != nil || admin1NotifCount != 1 {
+		t.Errorf("expected 1 persistent notification for admin1, got count=%d, err=%v", admin1NotifCount, err)
+	}
+
+	// Verify Admin 2 persistent notification in DB
+	var admin2NotifCount int
+	err = db.Pool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM notifications
+		WHERE user_id = $1 AND title = 'New Order' AND data->>'order_id' = $2
+	`, admin2.ID, createdOrder.ID).Scan(&admin2NotifCount)
+	if err != nil || admin2NotifCount != 1 {
+		t.Errorf("expected 1 persistent notification for admin2, got count=%d, err=%v", admin2NotifCount, err)
+	}
+
+	// 2. Idempotent replay: student posts identical checkout request
+	reqReplay := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBuffer(checkoutBody))
+	reqReplay.Header.Set("Authorization", "Bearer "+studentToken)
+	reqReplay.Header.Set("Idempotency-Key", idempKey)
+	reqReplay.Header.Set("Content-Type", "application/json")
+	wReplay := httptest.NewRecorder()
+	router.ServeHTTP(wReplay, reqReplay)
+
+	if wReplay.Code != http.StatusCreated {
+		t.Fatalf("expected 201 on replay, got %d: %s", wReplay.Code, wReplay.Body.String())
+	}
+
+	// Verify NO duplicate notifications were inserted on replay
+	_ = db.Pool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM notifications
+		WHERE user_id = $1 AND title = 'New Order' AND data->>'order_id' = $2
+	`, admin1.ID, createdOrder.ID).Scan(&admin1NotifCount)
+	if admin1NotifCount != 1 {
+		t.Errorf("expected still 1 notification after replay, got %d", admin1NotifCount)
+	}
+
+	// 3. Admin fetches notifications via GET /api/v1/notifications
+	reqGetNotifs := httptest.NewRequest(http.MethodGet, "/api/v1/notifications", nil)
+	reqGetNotifs.Header.Set("Authorization", "Bearer "+admin1Token)
+	wGetNotifs := httptest.NewRecorder()
+	router.ServeHTTP(wGetNotifs, reqGetNotifs)
+	if wGetNotifs.Code != http.StatusOK {
+		t.Fatalf("failed to fetch notifications: %d %s", wGetNotifs.Code, wGetNotifs.Body.String())
+	}
+
+	var notifList models.NotificationListResponse
+	if err := json.Unmarshal(wGetNotifs.Body.Bytes(), &notifList); err != nil {
+		t.Fatalf("failed to unmarshal notifications: %v", err)
+	}
+	if notifList.UnreadCount < 1 {
+		t.Errorf("expected admin unread_count >= 1, got %d", notifList.UnreadCount)
+	}
+
+	// 4. Admin marks all as read
+	reqReadAll := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/read-all", nil)
+	reqReadAll.Header.Set("Authorization", "Bearer "+admin1Token)
+	wReadAll := httptest.NewRecorder()
+	router.ServeHTTP(wReadAll, reqReadAll)
+	if wReadAll.Code != http.StatusOK {
+		t.Fatalf("failed to mark all as read: %d %s", wReadAll.Code, wReadAll.Body.String())
+	}
+
+	var afterReadAll models.NotificationListResponse
+	reqGetAfter := httptest.NewRequest(http.MethodGet, "/api/v1/notifications", nil)
+	reqGetAfter.Header.Set("Authorization", "Bearer "+admin1Token)
+	wGetAfter := httptest.NewRecorder()
+	router.ServeHTTP(wGetAfter, reqGetAfter)
+	_ = json.Unmarshal(wGetAfter.Body.Bytes(), &afterReadAll)
+	if afterReadAll.UnreadCount != 0 {
+		t.Errorf("expected unread_count=0 after read-all, got %d", afterReadAll.UnreadCount)
+	}
+}
+

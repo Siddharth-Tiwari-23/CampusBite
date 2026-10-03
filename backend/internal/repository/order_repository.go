@@ -51,6 +51,23 @@ func NewOrderRepository(db *database.DB) *OrderRepository {
 //   - If PROCESSING: returns ErrIdempotencyProcessing to prevent concurrent duplicate execution.
 //   - If FAILED: returns ErrIdempotencyFailed.
 func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, idempotencyKey string, requestHash string, paymentMethodOption ...string) (*models.OrderResponse, error) {
+	order, _, err := r.CreateFromCartWithStatus(ctx, userID, idempotencyKey, requestHash, paymentMethodOption...)
+	return order, err
+}
+
+// CreateFromCartWithStatus behaves like CreateFromCart but additionally reports whether the
+// order was newly created in this call (true) or returned from an idempotent replay (false).
+// Callers must only emit side effects such as NEW_ORDER broadcasts when created is true.
+func (r *OrderRepository) CreateFromCartWithStatus(ctx context.Context, userID string, idempotencyKey string, requestHash string, paymentMethodOption ...string) (*models.OrderResponse, bool, error) {
+	created := false
+	order, err := r.createFromCart(ctx, &created, userID, idempotencyKey, requestHash, paymentMethodOption...)
+	if err != nil {
+		return nil, false, err
+	}
+	return order, created, nil
+}
+
+func (r *OrderRepository) createFromCart(ctx context.Context, created *bool, userID string, idempotencyKey string, requestHash string, paymentMethodOption ...string) (*models.OrderResponse, error) {
 	if idempotencyKey == "" {
 		return nil, errors.New("idempotency key is required")
 	}
@@ -310,6 +327,38 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, ide
 		}
 	}
 
+	// 7b. Persist a durable "New Order" notification for every ADMIN account.
+	// Runs inside the checkout transaction so it is committed exactly once together
+	// with the order; idempotent replays never reach this point.
+	adminShortID := order.ID
+	if len(adminShortID) > 8 {
+		adminShortID = adminShortID[:8]
+	}
+	adminDataBytes, _ := json.Marshal(map[string]interface{}{
+		"order_id":       order.ID,
+		"total_amount":   totalAmount,
+		"payment_method": paymentMethod,
+		"event":          "NEW_ORDER",
+	})
+	insertAdminNotifQuery := `
+		INSERT INTO notifications (user_id, type, title, message, data, is_read, created_at)
+		SELECT u.id, $1, $2, $3, $4, false, NOW()
+		FROM users u
+		WHERE u.role = $5
+	`
+	_, err = tx.Exec(ctx, insertAdminNotifQuery,
+		models.NotificationTypeOrderStatus,
+		"New Order",
+		fmt.Sprintf("Order #%s has been placed.", adminShortID),
+		adminDataBytes,
+		models.RoleAdmin,
+	)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		r.recordIdempotencyFailure(ctx, userID, idempotencyKey, requestHash, err.Error())
+		return nil, fmt.Errorf("failed to persist admin new-order notifications: %w", err)
+	}
+
 	// 8. Clear user's cart items
 	clearCartQuery := `
 		DELETE FROM cart_items ci
@@ -354,6 +403,9 @@ func (r *OrderRepository) CreateFromCart(ctx context.Context, userID string, ide
 		return nil, fmt.Errorf("failed to commit order transaction: %w", err)
 	}
 
+	if created != nil {
+		*created = true
+	}
 	return &order, nil
 }
 

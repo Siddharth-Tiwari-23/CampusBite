@@ -58,6 +58,7 @@ export function NotificationProvider({ children }) {
 
     // 3. Admin receives new placed order
     const handleNewOrder = () => {
+      refreshNotifications()
       playNotificationSound()
     }
 

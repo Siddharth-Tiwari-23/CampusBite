@@ -140,9 +140,17 @@ function getCategoryForItem(item) {
       )
     }
 
-    const unsub = wsClient.on('ORDER_STATUS_UPDATED', handleStatusUpdate)
-    return () => unsub()
-  }, [])
+    const handleNewOrder = () => {
+      fetchOrders()
+    }
+
+    const unsubStatus = wsClient.on('ORDER_STATUS_UPDATED', handleStatusUpdate)
+    const unsubNewOrder = wsClient.on('NEW_ORDER', handleNewOrder)
+    return () => {
+      unsubStatus()
+      unsubNewOrder()
+    }
+  }, [fetchOrders])
 
   const handleUpdateStatus = async (orderId, newStatus) => {
     setUpdatingOrderId(orderId)
