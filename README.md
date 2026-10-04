@@ -222,6 +222,25 @@ docker compose --profile full down
    - Gemini translates admin business queries into structured intent codes.
    - The Go backend verifies the intent against a strict allowlist and executes predefined parameterized SQL queries. **Zero arbitrary text-to-SQL or direct database exposure.**
 
+## End-to-End Verification Status
+
+The deployed CampusBite application has been manually verified through the real Razorpay Test Mode checkout flow:
+
+- ✅ Razorpay Test Mode browser checkout completed successfully
+- ✅ Payment verification completed and order transitioned to CONFIRMED
+- ✅ Student notification delivered with sound
+- ✅ Admin notification delivered with sound
+- ✅ Realtime order/notification updates verified
+- ✅ Payment amount consistency verified between cart, backend order, and Razorpay checkout
+- ⏳ Direct Razorpay webhook delivery from the Razorpay Dashboard to the deployed Render endpoint remains a separate manual verification step
+
+Automated verification also passes:
+
+- `go test -count=1 ./...`
+- `go vet ./...`
+- `go build ./...`
+- `npm run build`
+
 ---
 
 ## Testing & Verification
