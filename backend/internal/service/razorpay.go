@@ -23,6 +23,7 @@ type RazorpayService interface {
 	GetKeyID() string
 	ComputePaymentSignature(razorpayOrderID, razorpayPaymentID string) string
 	ComputeWebhookSignature(bodyBytes []byte) string
+	IsProduction() bool
 }
 
 type razorpayService struct {
@@ -30,10 +31,16 @@ type razorpayService struct {
 	keySecret     string
 	webhookSecret string
 	httpClient    *http.Client
+	isProduction  bool
 }
 
 // NewRazorpayService returns a new instance of RazorpayService.
-func NewRazorpayService(keyID, keySecret, webhookSecret string) RazorpayService {
+// In production mode (isProduction=true), real Razorpay credentials are required and mock behavior is strictly forbidden.
+func NewRazorpayService(keyID, keySecret, webhookSecret string, isProduction ...bool) RazorpayService {
+	prod := false
+	if len(isProduction) > 0 {
+		prod = isProduction[0]
+	}
 	return &razorpayService{
 		keyID:         keyID,
 		keySecret:     keySecret,
@@ -41,20 +48,32 @@ func NewRazorpayService(keyID, keySecret, webhookSecret string) RazorpayService 
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		isProduction: prod,
 	}
+}
+
+func (s *razorpayService) IsProduction() bool {
+	return s.isProduction
 }
 
 func (s *razorpayService) GetKeyID() string {
 	return s.keyID
 }
 
-// CreateRazorpayOrder calls the Razorpay API to create an order or generates a mock order ID if using mock keys.
+// CreateRazorpayOrder calls the Razorpay API to create an order.
+// In test/development mode with mock credentials, it generates a mock order ID.
+// In production mode, mock order generation is strictly forbidden.
 func (s *razorpayService) CreateRazorpayOrder(ctx context.Context, amountInPaise int64, receipt string) (string, error) {
-	// If mock/test key is used for testing without live credentials, return a mock Razorpay order ID
-	if strings.Contains(s.keyID, "mock") || strings.Contains(s.keySecret, "mock") || s.keyID == "" {
+	// If in development/test mode AND using mock keys, return a mock Razorpay order ID.
+	// In production mode (s.isProduction == true), mock behavior is strictly forbidden.
+	if !s.isProduction && (strings.Contains(s.keyID, "mock") || strings.Contains(s.keySecret, "mock") || s.keyID == "") {
 		randomBytes := make([]byte, 8)
 		_, _ = rand.Read(randomBytes)
 		return fmt.Sprintf("order_%s", hex.EncodeToString(randomBytes)), nil
+	}
+
+	if s.keyID == "" || s.keySecret == "" {
+		return "", fmt.Errorf("razorpay credentials not configured")
 	}
 
 	payload := map[string]interface{}{
@@ -114,12 +133,17 @@ func (s *razorpayService) ComputePaymentSignature(razorpayOrderID, razorpayPayme
 }
 
 // VerifyPaymentSignature verifies HMAC-SHA256(razorpay_order_id + "|" + razorpay_payment_id, keySecret).
+// In production mode, mock signatures like "sig_test_" are strictly rejected.
 func (s *razorpayService) VerifyPaymentSignature(razorpayOrderID, razorpayPaymentID, signature string) bool {
 	if razorpayOrderID == "" || razorpayPaymentID == "" || signature == "" {
 		return false
 	}
-	if (strings.Contains(s.keySecret, "mock") || s.keySecret == "") && strings.HasPrefix(signature, "sig_test_") {
+	// In test/development mode with mock credentials, allow test signatures
+	if !s.isProduction && (strings.Contains(s.keySecret, "mock") || s.keySecret == "") && strings.HasPrefix(signature, "sig_test_") {
 		return true
+	}
+	if s.keySecret == "" {
+		return false
 	}
 	expectedSignature := s.ComputePaymentSignature(razorpayOrderID, razorpayPaymentID)
 	return hmac.Equal([]byte(expectedSignature), []byte(signature))
@@ -133,12 +157,17 @@ func (s *razorpayService) ComputeWebhookSignature(bodyBytes []byte) string {
 }
 
 // VerifyWebhookSignature verifies HMAC-SHA256(rawBody, webhookSecret).
+// In production mode, mock signatures like "sig_test_" are strictly rejected.
 func (s *razorpayService) VerifyWebhookSignature(bodyBytes []byte, signatureHeader string) bool {
 	if len(bodyBytes) == 0 || signatureHeader == "" {
 		return false
 	}
-	if (strings.Contains(s.webhookSecret, "mock") || s.webhookSecret == "") && strings.HasPrefix(signatureHeader, "sig_test_") {
+	// In test/development mode with mock credentials, allow test signatures
+	if !s.isProduction && (strings.Contains(s.webhookSecret, "mock") || s.webhookSecret == "") && strings.HasPrefix(signatureHeader, "sig_test_") {
 		return true
+	}
+	if s.webhookSecret == "" {
+		return false
 	}
 	expectedSignature := s.ComputeWebhookSignature(bodyBytes)
 	return hmac.Equal([]byte(expectedSignature), []byte(signatureHeader))

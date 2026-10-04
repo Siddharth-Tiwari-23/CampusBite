@@ -188,6 +188,7 @@ docker compose --profile full down
    - **Runtime**: `Docker` (Render automatically detects `backend/Dockerfile`).
 3. **Configure Environment Variables on Render**:
    ```env
+   APP_ENV=production
    PORT=8080
    DATABASE_URL=postgres://<user>:<password>@<host>:<port>/<database>?sslmode=require
    REDIS_URL=rediss://<user>:<password>@<host>:<port>/0

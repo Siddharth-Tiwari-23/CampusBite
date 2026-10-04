@@ -57,8 +57,8 @@ func main() {
 	// Initialize WebSocket Hub
 	wsHub := ws.NewHub()
 
-	// Initialize Razorpay Service
-	razorpayService := service.NewRazorpayService(cfg.RazorpayKeyID, cfg.RazorpayKeySecret, cfg.RazorpayWebhookSecret)
+	// Initialize Razorpay Service (enforcing production validation when APP_ENV=production)
+	razorpayService := service.NewRazorpayService(cfg.RazorpayKeyID, cfg.RazorpayKeySecret, cfg.RazorpayWebhookSecret, cfg.IsProduction())
 
 	router := routes.SetupRouter(db, tokenService, razorpayService, cacheService, wsHub)
 

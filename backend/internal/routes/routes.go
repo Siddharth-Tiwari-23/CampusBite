@@ -53,9 +53,9 @@ func SetupRouter(db *database.DB, tokenService *auth.TokenService, optionalServi
 
 	if razorpayService == nil {
 		if err != nil || cfg == nil {
-			razorpayService = service.NewRazorpayService("rzp_test_campusbite_mock_key", "rzp_test_campusbite_mock_secret", "rzp_test_campusbite_mock_webhook_secret")
+			razorpayService = service.NewRazorpayService("rzp_test_campusbite_mock_key", "rzp_test_campusbite_mock_secret", "rzp_test_campusbite_mock_webhook_secret", false)
 		} else {
-			razorpayService = service.NewRazorpayService(cfg.RazorpayKeyID, cfg.RazorpayKeySecret, cfg.RazorpayWebhookSecret)
+			razorpayService = service.NewRazorpayService(cfg.RazorpayKeyID, cfg.RazorpayKeySecret, cfg.RazorpayWebhookSecret, cfg.IsProduction())
 		}
 	}
 
